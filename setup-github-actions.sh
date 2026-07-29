@@ -61,6 +61,7 @@ $SUDO apt-get install -y -qq \
     vim \
     nano \
     htop \
+    tmux \
     2>&1 | tail -1
 
 # Install ttyd (web terminal) — try apt first, fall back to binary download
@@ -162,7 +163,7 @@ file=/tmp/supervisor.sock
 serverurl=unix:///tmp/supervisor.sock
 
 [program:ttyd]
-command=/usr/bin/ttyd -p 4200 -c root:PASSWORD_HERE bash
+command=/usr/bin/ttyd -p 4200 -t disableResize=on tmux new -A -s render-shell
 stdout_logfile=/dev/stdout
 stdout_logfile_maxbytes=0
 stderr_logfile=/dev/stderr
@@ -185,8 +186,8 @@ startretries=3
 priority=20
 SUPERVISOR
 
-# Replace password placeholder with actual value
-$SUDO sed -i "s/PASSWORD_HERE/${ROOT_PASSWORD}/g" /etc/supervisor/conf.d/render-shell.conf
+# Replace password placeholder if present (ttyd no longer uses it)
+$SUDO sed -i "s/PASSWORD_HERE/${ROOT_PASSWORD}/g" /etc/supervisor/conf.d/render-shell.conf 2>/dev/null || true
 
 log "Supervisor config generated"
 
