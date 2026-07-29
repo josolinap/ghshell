@@ -117,7 +117,12 @@ jobs:
           if [ "${FUNNEL}" = "true" ]; then
             echo ""
             echo "🌍 Setting up Tailscale Funnel (public internet)..."
-            sudo tailscale funnel --bg 4200 2>&1 || warn "Funnel setup failed (may not be enabled in Tailscale admin)"
+            echo "   Note: Funnel MUST be enabled in Tailscale admin console (DNS → Funnel)"
+            timeout 30 sudo tailscale funnel --bg 4200 2>&1 || {
+              echo "⚠️  Funnel setup FAILED or timed out"
+              echo "   → Web terminal is still accessible via Tailscale Serve (tailnet only)"
+              echo "   → To enable Funnel, go to Tailscale Admin → DNS → HTTPS Certificates"
+            }
             echo ""
             echo "🌍 Funnel status:"
             sudo tailscale funnel status 2>&1 || true
