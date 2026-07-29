@@ -66,7 +66,7 @@ $SUDO apt-get install -y -qq \
 
 # Install webshell dependencies (Python WebSocket terminal)
 log "Installing webshell dependencies..."
-pip3 install -q websockets 2>&1 | tail -1 || {
+pip3 install -U -q websockets 2>&1 | tail -1 || {
     warn "pip install failed, trying apt..."
     $SUDO apt-get install -y -qq python3-websockets 2>/dev/null || true
 }
