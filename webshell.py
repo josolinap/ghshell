@@ -77,16 +77,36 @@ INDEX_HTML = r"""<!DOCTYPE html>
       term.open(document.getElementById('terminal'));
       try { fitAddon.fit(); } catch(e) {}
 
-      // ── Output poller ────────────────────────────────────────────────
+      // ── Config ─────────────────────────────────────────────────────
+      var POLL_MS = 200;        // normal poll interval
+      var POLL_MAX_MS = 4000;   // max back-off interval
+      var pollMs = POLL_MS;     // current interval (adaptive)
+      var fetchTimeoutMs = 15000;  // individual fetch timeout
+      var errorsSinceSuccess = 0;
+
+      function doFetch(url, opts) {
+        opts = opts || {};
+        var ctrl = new AbortController();
+        opts.signal = ctrl.signal;
+        var timer = setTimeout(function() { ctrl.abort(); }, fetchTimeoutMs);
+        return fetch(url, opts).then(function(r) {
+          clearTimeout(timer);
+          return r;
+        }).catch(function(err) {
+          clearTimeout(timer);
+          throw err;
+        });
+      }
+
+      // ── Output poller (adaptive back-off) ───────────────────────────
       function pollOutput() {
         if (polling) return;
         polling = true;
 
-        fetch('/output?since=' + lastSeq)
+        doFetch('/output?since=' + lastSeq)
           .then(function(r) { return r.json(); })
           .then(function(data) {
             if (data.data && data.data.length > 0) {
-              // Decode base64
               var binary = atob(data.data);
               var arr = new Uint8Array(binary.length);
               for (var i = 0; i < binary.length; i++) {
@@ -96,22 +116,27 @@ INDEX_HTML = r"""<!DOCTYPE html>
               lastSeq = data.seq;
             }
             setStatus('connected', 'Connected');
+            errorsSinceSuccess = 0;
+            pollMs = POLL_MS;
           })
           .catch(function(err) {
-            setStatus('error', 'Connection error - retrying');
-            console.error('Poll error:', err);
+            errorsSinceSuccess++;
+            pollMs = Math.min(POLL_MAX_MS, POLL_MS * Math.pow(2, errorsSinceSuccess));
+            var msg = err.name === 'AbortError' ? 'Timed out' : (err.message || 'Network error');
+            setStatus('error', msg + ' - retry in ' + (pollMs/1000) + 's');
+            console.error('Poll error (' + errorsSinceSuccess + '):', msg);
           })
           .then(function() {
             polling = false;
             if (!term._disposed) {
-              setTimeout(pollOutput, 200);
+              setTimeout(pollOutput, pollMs);
             }
           });
       }
 
       // ── Input sender ─────────────────────────────────────────────────
       function sendInput(data) {
-        fetch('/input', {
+        doFetch('/input', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({data: data}),
@@ -126,7 +151,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
       });
 
       term.onResize(function(size) {
-        fetch('/resize', {
+        doFetch('/resize', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({cols: size.cols, rows: size.rows}),
@@ -135,23 +160,32 @@ INDEX_HTML = r"""<!DOCTYPE html>
         });
       });
 
-      // ── Start ────────────────────────────────────────────────────────
+      // ── Start (with retries) ─────────────────────────────────────────
       setStatus('connecting', 'Starting terminal session...');
 
-      // Initial terminal connection: start the PTY
-      fetch('/start', {method: 'POST'})
-        .then(function(r) { return r.json(); })
-        .then(function(resp) {
-          if (resp.status === 'ok') {
-            setStatus('connected', 'Connected');
-            pollOutput();
-          } else {
-            setStatus('error', 'Failed to start: ' + (resp.error || 'unknown'));
-          }
-        })
-        .catch(function(err) {
-          setStatus('error', 'Failed to connect: ' + err.message);
-        });
+      function tryStart(retries) {
+        doFetch('/start', {method: 'POST'})
+          .then(function(r) { return r.json(); })
+          .then(function(resp) {
+            if (resp.status === 'ok') {
+              setStatus('connected', 'Connected');
+              pollOutput();
+            } else {
+              setStatus('error', 'Failed to start: ' + (resp.error || 'unknown'));
+            }
+          })
+          .catch(function(err) {
+            retries = (retries || 0) + 1;
+            if (retries < 4) {
+              setStatus('connecting', 'Retrying ' + retries + '/3...');
+              setTimeout(function() { tryStart(retries); }, 2000 * retries);
+            } else {
+              var msg = err.name === 'AbortError' ? 'Timed out' : (err.message || 'failed');
+              setStatus('error', 'Failed after ' + retries + ' retries: ' + msg);
+            }
+          });
+      }
+      tryStart(0);
 
       // ── Window resize ────────────────────────────────────────────────
       window.addEventListener('resize', function() {
