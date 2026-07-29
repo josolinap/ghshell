@@ -66,7 +66,8 @@ jobs:
   render-shell:
     name: RenderShell Runner
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ inputs.duration_hours != '' && fromJSON(inputs.duration_hours) * 60 || 360 }}
+    # Fixed max timeout. The keep-alive loop manages actual duration.
+    timeout-minutes: 360
 
     # Required so `gh workflow run` can dispatch the next session
     permissions:
@@ -150,12 +151,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          DURATION_SECS=$(( ${{ inputs.duration_hours != '' && fromJSON(inputs.duration_hours) || 6 }} * 3600 ))
+          DURATION_HOURS=${{ inputs.duration_hours != '' && inputs.duration_hours || '6' }}
+          DURATION_SECS=$(( DURATION_HOURS * 3600 ))
           END=$(( $(date -u +%s) + DURATION_SECS ))
           RETRIGGER_AT=$(( END - 120 ))  # Fire next run 2 minutes before expiry
 
+          # Build retrigger CLI flags
+          RETRIGGER_FLAGS="--field duration_hours=${DURATION_HOURS}"
+          HOSTNAME_OVERRIDE="${{ inputs.hostname }}"
+          if [ -n "${HOSTNAME_OVERRIDE}" ]; then
+            RETRIGGER_FLAGS="${RETRIGGER_FLAGS} --field hostname=${HOSTNAME_OVERRIDE}"
+          fi
+
           echo "🧠 Keeping runner alive until $(date -d @${END} -u)"
-          echo "   Duration: ${{ inputs.duration_hours || 6 }} hours"
+          echo "   Duration: ${DURATION_HOURS} hours"
           echo "   Auto-retrigger at: $(date -d @${RETRIGGER_AT} -u)"
 
           while [ $(date -u +%s) -lt ${END} ]; do
@@ -167,10 +176,10 @@ jobs:
               echo "🔄 Auto-retriggering next RenderShell session..."
               echo ""
               # Dispatch the next run — this chains sessions indefinitely
+              # shellcheck disable=SC2086
               gh workflow run "${GITHUB_WORKFLOW}" \
                 --ref "${GITHUB_REF_NAME}" \
-                ${{ inputs.hostname != '' && format('--field hostname={0}', inputs.hostname) || '' }} \
-                --field duration_hours=${{ inputs.duration_hours || 6 }} \
+                ${RETRIGGER_FLAGS} \
                 2>&1 && echo "✅ Next session triggered!" || echo "⚠️  Retrigger failed (will try again next loop)"
             fi
 
