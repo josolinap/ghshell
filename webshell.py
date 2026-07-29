@@ -10,13 +10,9 @@ import fcntl
 import json
 import logging
 import os
-import pty
 import signal
-import struct
+import subprocess
 import sys
-import termios
-import time
-import tty as tty_mod
 from collections import deque
 
 logging.basicConfig(
@@ -167,58 +163,60 @@ INDEX_HTML = r"""<!DOCTYPE html>
 </html>"""
 
 
-# ── PTY Terminal Manager ──────────────────────────────────────────────────
+# ── PTY Terminal Manager (via script subprocess, no pty.fork) ──────────
+# GitHub Actions runners block pty.fork() (seccomp). We use /usr/bin/script
+# which creates a PTY internally and is available on all Ubuntu systems.
+
+SCRIPT_BIN = "/usr/bin/script"
+
+
 class PTYManager:
-    """Manages a single PTY session with output buffering."""
+    """Manages a single shell session via `script` subprocess."""
 
     def __init__(self):
+        self.proc = None  # subprocess.Popen
         self.pid = None
-        self.fd = None
         self.cols = 80
         self.rows = 24
         self.output_buffer = deque()  # list of (seq, data_bytes)
         self.seq = 0
-        self.lock = asyncio.Lock()
-        self._reader_task = None
-
-    def set_winsize(self, fd, rows, cols):
-        winsize = struct.pack("HHHH", rows, cols, 0, 0)
-        try:
-            fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
-        except OSError:
-            pass
 
     def spawn(self):
-        """Spawn a new PTY with bash."""
-        if self.pid:
-            self.cleanup()
+        """Spawn a bash shell via `script` (which creates a PTY internally)."""
+        self.cleanup()
 
-        pid, fd = pty.fork()
-        if pid == 0:  # Child
-            try:
-                os.setsid()
-                self.set_winsize(fd, self.rows, self.cols)
-                # Use --norc --noprofile to avoid any bashrc issues
-                os.execvpe("/bin/bash", ["/bin/bash", "--norc", "--noprofile"], os.environ)
-            except Exception as e:
-                log.error(f"Child exec failed: {e}")
-                os._exit(1)
-        else:  # Parent
-            self.pid = pid
-            self.fd = fd
-            try:
-                tty_mod.setraw(fd)
-            except Exception:
-                pass
-            log.info(f"PTY spawned: pid={pid}, fd={fd}")
-            return fd
+        env = os.environ.copy()
+        env["TERM"] = "xterm-256color"
+        env["COLUMNS"] = str(self.cols)
+        env["LINES"] = str(self.rows)
+
+        try:
+            self.proc = subprocess.Popen(
+                [SCRIPT_BIN, "-qefc", "/bin/bash", "/dev/null"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=env,
+                bufsize=0,
+                preexec_fn=os.setsid,
+            )
+            self.pid = self.proc.pid
+            # Set stdout to non-blocking
+            fd = self.proc.stdout.fileno()
+            fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+            fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+            log.info(f"Shell spawned via script: pid={self.pid}")
+        except Exception as e:
+            log.error(f"Spawn failed: {e}")
+            self.proc = None
+            self.pid = None
 
     def read_nonblock(self):
-        """Non-blocking read from PTY, appends to buffer."""
-        if self.fd is None:
+        """Non-blocking read from shell stdout, appends to buffer."""
+        if not self.proc or not self.proc.stdout:
             return b""
         try:
-            data = os.read(self.fd, 65536)
+            data = self.proc.stdout.read(65536)
             if data:
                 self.seq += len(data)
                 self.output_buffer.append((self.seq, data))
@@ -232,13 +230,14 @@ class PTYManager:
             return b""
 
     def write(self, data: bytes):
-        """Write to PTY."""
-        if self.fd is None:
+        """Write to shell stdin."""
+        if not self.proc or not self.proc.stdin:
             return
         try:
-            os.write(self.fd, data)
+            self.proc.stdin.write(data)
+            self.proc.stdin.flush()
         except OSError as e:
-            log.warning(f"PTY write failed: {e}")
+            log.warning(f"Shell write failed: {e}")
 
     def get_output_since(self, since_seq: int):
         """Get all output data since a given sequence number."""
@@ -251,27 +250,27 @@ class PTYManager:
         return final_seq, result
 
     def cleanup(self):
-        """Kill child and close PTY."""
-        if self.pid:
+        """Kill shell process."""
+        if self.proc:
             try:
-                os.kill(self.pid, signal.SIGHUP)
-                os.waitpid(self.pid, 0)
-            except (ProcessLookupError, ChildProcessError, OSError):
+                pgid = os.getpgid(self.proc.pid)
+                os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, OSError):
                 pass
+            try:
+                self.proc.kill()
+                self.proc.wait(timeout=2)
+            except Exception:
+                pass
+            self.proc = None
             self.pid = None
-        if self.fd:
-            try:
-                os.close(self.fd)
-            except OSError:
-                pass
-            self.fd = None
         self.output_buffer.clear()
-        log.info("PTY cleaned up")
+        log.info("Shell cleaned up")
 
 
 # ── Global State ──────────────────────────────────────────────────────────
 pty_mgr = PTYManager()
-pty_mgr.spawn()  # Pre-spawn PTY on startup
+pty_mgr.spawn()  # Pre-spawn shell on startup
 
 
 # ── Simple Async HTTP Server ─────────────────────────────────────────────
