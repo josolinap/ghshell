@@ -1,0 +1,157 @@
+# =============================================================================
+# RenderShell — GitHub Actions Workflow
+# =============================================================================
+# Spins up a full RenderShell stack on a GitHub Actions runner:
+#   - Tailscale exit node (userspace mode)
+#   - Shellinabox web terminal (via Tailscale Serve on port 443 → 4200)
+#   - File Browser web file manager (via Tailscale Serve /files → 5800)
+#   - SSH daemon + HTTP status page
+#
+# Trigger: manual (workflow_dispatch) or scheduled keep-alive
+# Max run time: 6 hours (GitHub limit for workflow_dispatch on free tier)
+#
+# Required secrets:
+#   TAILSCALE_AUTHKEY — reusable auth key (tskey-auth-xxxxx-xxxxx)
+#   ROOT_PASSWORD     — password for root shell + SSH
+#   FILEBROWSER_PASSWORD — password for file browser admin login
+#
+# Optional secrets:
+#   TAILSCALE_HOSTNAME — custom hostname on your tailnet (default: render-shell)
+# =============================================================================
+
+name: RenderShell
+
+on:
+  # Manual trigger — lets you start a session on demand
+  workflow_dispatch:
+    inputs:
+      duration_hours:
+        description: 'How long to keep running (max 6)'
+        type: number
+        default: 6
+        required: false
+      hostname:
+        description: 'Tailscale hostname override'
+        type: string
+        default: ''
+        required: false
+
+  # Scheduled keep-alive — fires at 6am/12pm/6pm UTC daily
+  # Each run lasts ~6h, so 3 runs covers most of the day
+  schedule:
+    - cron: '0 6,12,18 * * *'
+
+  # Allow calling from other workflows
+  workflow_call:
+    inputs:
+      duration_hours:
+        type: number
+        default: 6
+      hostname:
+        type: string
+        default: ''
+    secrets:
+      TAILSCALE_AUTHKEY:
+        required: true
+      ROOT_PASSWORD:
+        required: true
+      FILEBROWSER_PASSWORD:
+        required: true
+
+concurrency:
+  group: render-shell
+  cancel-in-progress: false  # Don't kill an active session
+
+jobs:
+  render-shell:
+    name: RenderShell Runner
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.duration_hours != '' && fromJSON(inputs.duration_hours) * 60 || 360 }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup — install dependencies + configure services
+        id: setup
+        env:
+          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+          ROOT_PASSWORD: ${{ secrets.ROOT_PASSWORD }}
+          FILEBROWSER_PASSWORD: ${{ secrets.FILEBROWSER_PASSWORD }}
+          TAILSCALE_HOSTNAME: ${{ inputs.hostname || 'render-shell' }}
+        run: |
+          bash setup-github-actions.sh
+          echo "started_at=$(date -u +%s)" >> $GITHUB_OUTPUT
+
+      - name: Tailscale Serve — expose web terminal & file browser
+        shell: bash
+        run: |
+          echo "⏳ Waiting for tailscale to be ready..."
+          for i in $(seq 1 30); do
+            if tailscale status 2>/dev/null | grep -q "$(tailscale status 2>/dev/null | head -1 | awk '{print $2}')"; then
+              break
+            fi
+            sleep 2
+          done
+
+          echo "✅ Tailscale is up"
+          tailscale status
+
+          echo ""
+          echo "🌐 Setting up Tailscale Serve..."
+          # Expose shellinabox on root path (port 443 → 4200)
+          tailscale serve --bg 4200 2>&1 || true
+          # Expose filebrowser on /files (port 443 → 5800)
+          tailscale serve --bg --set-path /files http://localhost:5800 2>&1 || true
+
+          echo ""
+          echo "🔗 Tailscale Serve config:"
+          tailscale serve status
+
+      - name: Session Info
+        shell: bash
+        run: |
+          HOSTNAME="${TAILSCALE_HOSTNAME:-render-shell}"
+          TAILNET=$(tailscale status 2>/dev/null | head -1 | awk '{print $2}' | sed 's/.*@//')
+
+          echo "╔═══════════════════════════════════════════════════════════════╗"
+          echo "║              🚀 RenderShell is LIVE                         ║"
+          echo "╚═══════════════════════════════════════════════════════════════╝"
+          echo ""
+          echo "   Tailscale node:  ${HOSTNAME}"
+          echo "   Tailnet:         ${TAILNET}"
+          echo ""
+          echo "   📡 Web Terminal:  https://${HOSTNAME}.${TAILNET}.ts.net/"
+          echo "   📁 File Browser:  https://${HOSTNAME}.${TAILNET}.ts.net/files"
+          echo "   📊 Status:        http://localhost:8080"
+          echo ""
+          echo "   Login:  root / <your ROOT_PASSWORD>"
+          echo "   File browser: admin / <your FILEBROWSER_PASSWORD>"
+          echo ""
+          echo "   ⏱  Started: $(date -u)"
+          echo "   ⏱  Expires: ~${{ inputs.duration_hours || 6 }} hours from now"
+          echo "   ⏱  Job ID:  ${{ github.run_id }}"
+          echo ""
+
+      # ======================================================================
+      # Keep-alive: the runner stays alive for the configured duration
+      # A simple heartbeat loop prevents GH from considering it idle
+      # ======================================================================
+      - name: Keep Alive
+        shell: bash
+        run: |
+          END=$(( $(date -u +%s) + ${{ inputs.duration_hours != '' && fromJSON(inputs.duration_hours) * 3600 || 21600 }}))
+
+          echo "🧠 Keeping runner alive until $(date -d @${END} -u)"
+          echo "   (max ${{ inputs.duration_hours || 6 }} hours)"
+
+          while [ $(date -u +%s) -lt ${END} ]; do
+            # Heartbeat ping to prevent idle timeout
+            curl -sf http://localhost:8080 >/dev/null 2>&1 || true
+            tailscale status >/dev/null 2>&1 || true
+            sleep 300  # Report every 5 minutes
+            REMAINING=$(( (${END} - $(date -u +%s)) / 60 ))
+            echo "❤️  ${REMAINING} minutes remaining..."
+          done
+
+          echo "⏰ Session complete. Shutting down."

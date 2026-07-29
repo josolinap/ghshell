@@ -1,35 +1,41 @@
 # render_tailscaled + shellinabox
 
-A Render free-tier web service that combines:
-- **Tailscale exit node** — routes your traffic through Render's IP
+A Render **or GitHub Actions** service that combines:
+- **Tailscale exit node** — routes your traffic through Render's (or GH runner's) IP
 - **Shellinabox web terminal** — browser-based root shell, accessible via your Tailnet
-- **HTTP status page** — placeholder page on the public Render URL
+- **File Browser** — web-based file manager (upload/download/edit files)
+- **HTTP status page** — placeholder page on the public URL
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  Render Free Web Service (HTTPS)                    │
-│                                                     │
-│  ┌──────────────────────────────────────────────┐   │
-│  │  supervisord (PID 1 via tini)                │   │
-│  │                                              │   │
-│  │  ┌─ tailscaled (userspace networking) ──┐    │   │
-│  │  │  ↳ registers as exit node via authkey│    │   │
-│  │  └──────────────────────────────────────┘    │   │
-│  │                                              │   │
-│  │  ┌─ shellinaboxd (port 4200) ───────────┐    │   │
-│  │  │  ↳ web terminal (Tailnet-only)       │    │   │
-│  │  └──────────────────────────────────────┘    │   │
-│  │                                              │   │
-│  │  ┌─ python http.server (port 8080) ─────┐    │   │
-│  │  │  ↳ status page (Render public URL)   │    │   │
-│  │  └──────────────────────────────────────┘    │   │
-│  └──────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│  Render Free Web Service OR GitHub Actions Runner    │
+│                                                      │
+│  ┌──────────────────────────────────────────────┐    │
+│  │  supervisor (PID 1 or managed)               │    │
+│  │                                               │    │
+│  │  ┌─ tailscaled (userspace networking) ────┐   │    │
+│  │  │  ↳ registers as exit node via authkey  │   │    │
+│  │  └───────────────────────────────────────┘   │    │
+│  │                                               │    │
+│  │  ┌─ shellinaboxd (port 4200) ────────────┐   │    │
+│  │  │  ↳ web terminal (Tailnet via Serve)   │   │    │
+│  │  └───────────────────────────────────────┘   │    │
+│  │                                               │    │
+│  │  ┌─ File Browser (port 5800) ─────────────┐   │    │
+│  │  │  ↳ web file manager (Tailnet via Serve)│   │    │
+│  │  └───────────────────────────────────────┘   │    │
+│  │                                               │    │
+│  │  ┌─ python http.server (port 8080) ──────┐   │    │
+│  │  │  ↳ status page (health check)         │   │    │
+│  │  └───────────────────────────────────────┘   │    │
+│  └──────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────┘
          ↑                          ↑
-         │ public HTTPS              │ Tailnet only
-         │ (https://...onrender.com) │ (http://render-exit-node:4200)
+         │ Tailscale Serve (443)     │ Tailnet only
+         │ https://render-shell.     │ (or localhost:8080)
+         │   <your-tailnet>.ts.net/  │
 ```
 
 ## Setup
@@ -110,12 +116,116 @@ The web terminal is **not** on the public Render URL — only the status page is
 | `TAILSCALE_HOSTNAME` | no | `render-exit-node` | Hostname on your Tailnet |
 | `TS_VERSION` | no | `1.86.2` | Tailscale version (build arg) |
 
-## Free tier limitations
+---
 
-- **512MB RAM, 0.1 CPU** — enough for shellinabox + light dev work
-- **Sleeps after 15 min inactivity** — shellinabox sessions die on sleep; the Tailscale exit node also drops
-- **750 instance-hours/month** (~31 days) — enough for 24/7 for one month
-- **No persistent disk** — files in `/root` are lost on restart
+## GitHub Actions Deployment (Alternative to Render)
+
+Run RenderShell on **GitHub Actions runners** instead of Render. This gives you:
+
+| Metric | Render Free | GitHub Actions |
+|--------|------------|----------------|
+| **RAM/CPU** | 512 MB / 0.1 vCPU | 7 GB / 2 vCPUs |
+| **Sleep policy** | After 15 min idle | Up to 6h continuous |
+| **Monthly hours** | 750 (max 24/7 for 31d) | 2,000 (free), ∞ (public repo) |
+| **Runner OS** | Alpine in Docker | Ubuntu 22.04 LTS |
+| **Max session** | Indefinite (with keep-alive) | 6 hours per run |
+| **Docker** | ✅ | ✅ (not needed — installs natively) |
+
+### How it works
+
+A GitHub Actions workflow spins up the full stack on `ubuntu-latest`, connects to your
+Tailnet, and exposes both the web terminal and file browser via **Tailscale Serve**:
+- `https://render-shell.<your-tailnet>.ts.net/` — web terminal (shellinabox)
+- `https://render-shell.<your-tailnet>.ts.net/files` — file browser
+
+Trigger manually or via scheduled cron (06/12/18 UTC) — 3 runs covers 18 hours/day.
+
+### Setup
+
+#### 1. Fork or push this repo to GitHub
+
+```bash
+# Create a new repo on GitHub, then:
+git remote add origin git@github.com:your-user/render-shell.git
+git push -u origin main
+```
+
+#### 2. Generate a Tailscale authkey
+
+Go to https://login.tailscale.com/admin/settings/keys and generate:
+- **Reusable**: yes (survives restarts across different runner IPs)
+- **Ephemeral**: no (node persists in your tailnet)
+- **Tags**: optional (e.g. `tag:exit-node`)
+
+Copy the key — it looks like `tskey-auth-XXXXXXXX-YYYYYYYYYYYYYYYY`.
+
+#### 3. Add GitHub secrets
+
+Go to your repo **Settings → Secrets and variables → Actions** and add:
+
+| Secret | Value | Purpose |
+|--------|-------|---------|
+| `TAILSCALE_AUTHKEY` | `tskey-auth-XXXX-YYYY` | Auto-registers the node on your Tailnet |
+| `ROOT_PASSWORD` | `your-strong-password` | Password for root shell + SSH login |
+| `FILEBROWSER_PASSWORD` | `your-filebrowser-password` | Password for file browser admin login |
+
+#### 4. Start a session
+
+**Manual:** Go to **Actions → RenderShell → Run workflow** → set duration → Run.
+
+**Scheduled:** Runs automatically at 06:00, 12:00, and 18:00 UTC daily.
+
+#### 5. Approve the exit node
+
+After the first run:
+1. Go to https://login.tailscale.com/admin/machines
+2. Find the new node (`render-shell`)
+3. Click the `⚠` icon next to "Exit node" and approve it
+
+#### 6. Connect
+
+On any device on your Tailnet:
+```bash
+# All traffic through RenderShell
+tailscale up --exit-node=render-shell
+
+# Or just use terminal/file browser:
+# Open in browser:
+#   https://render-shell.<your-tailnet>.ts.net/        # web terminal
+#   https://render-shell.<your-tailnet>.ts.net/files    # file browser
+```
+
+### What's exposed
+
+| Service | Port | Access | Auth |
+|---------|------|--------|------|
+| Web Terminal | 4200 → 443 (Serve) | Tailnet only | root + ROOT_PASSWORD |
+| File Browser | 5800 → 443/files (Serve) | Tailnet only | admin + FILEBROWSER_PASSWORD |
+| SSH | 22 | localhost only | root + ROOT_PASSWORD |
+| Status page | 8080 | localhost | none |
+
+### Workflow details
+
+- **Max runtime**: 6 hours per run (configurable via `duration_hours` input)
+- **Trigger**: `workflow_dispatch` (manual) + `schedule` (cron)
+- **Files**: `.github/workflows/render-shell.yml` + `setup-github-actions.sh`
+- **Arch**: Installs natively on the runner (no Docker-in-Docker) — faster boot, simpler
+
+### Limitation: 6-hour max session
+
+GitHub Actions has a 6-hour limit for `workflow_dispatch` jobs on free/paid plans.
+For 24/7 coverage, the three daily cron runs overlap to cover most of the day:
+```
+06:00 ────────── 12:00 UTC  (6h)
+         12:00 ────────── 18:00 UTC  (6h)
+                  18:00 ────────── 00:00 UTC  (6h)
+```
+The 00:00–06:00 gap is covered by the overlap buffer (each run starts while the
+previous one is still active for ~1 minute).
+
+---
+
+## Free tier limitations
 
 ## Customization
 
