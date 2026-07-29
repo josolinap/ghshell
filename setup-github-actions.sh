@@ -1,10 +1,10 @@
 #!/bin/bash
 # =============================================================================
-# RenderShell — GitHub Actions Runner Setup Script (MINIMAL)
+# RenderShell — GitHub Actions Runner Setup Script
 # =============================================================================
 # Installs and configures on a GitHub Actions Ubuntu runner:
 #   - Tailscale (userspace networking, exit node)
-#   - TTYD (web terminal on port 4200, replaces shellinabox)
+#   - WebShell (Python WebSocket terminal on port 4200)
 #   - HTTP status page (on port 8080)
 #
 # Environment variables (set by the workflow from GitHub Secrets):
@@ -64,19 +64,27 @@ $SUDO apt-get install -y -qq \
     tmux \
     2>&1 | tail -1
 
-# Install ttyd (web terminal) — try apt first, fall back to binary download
-if ! command -v ttyd &>/dev/null; then
-    # Try apt first, then download static binary
-    $SUDO apt-get install -y -qq ttyd 2>/dev/null && log "ttyd installed via apt" || {
-        log "apt ttyd not available, downloading binary..."
-        $SUDO wget -q -O /usr/bin/ttyd \
-            https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64
-        $SUDO chmod +x /usr/bin/ttyd
-        log "ttyd binary downloaded"
-    }
-fi
+# Install webshell dependencies (Python WebSocket terminal)
+log "Installing webshell dependencies..."
+pip3 install -q websockets 2>&1 | tail -1 || {
+    warn "pip install failed, trying apt..."
+    $SUDO apt-get install -y -qq python3-websockets 2>/dev/null || true
+}
 
-log "Packages installed. ttyd: $(ttyd --version 2>&1 || true)"
+# Deploy webshell.py to /usr/local/bin/
+WEBSHELL_SRC="${REPO_ROOT:-.}/webshell.py"
+if [ -f "${WEBSHELL_SRC}" ]; then
+    $SUDO cp "${WEBSHELL_SRC}" /usr/local/bin/webshell.py
+    log "Deployed webshell.py from ${WEBSHELL_SRC}"
+elif [ -f "./webshell.py" ]; then
+    $SUDO cp ./webshell.py /usr/local/bin/webshell.py
+else
+    warn "webshell.py not found in repo checkout!"
+    warn "Web terminal will not be available."
+fi
+$SUDO chmod +x /usr/local/bin/webshell.py 2>/dev/null || true
+
+log "Packages installed. webshell: deployed"
 
 # ── 3. Configure SSH ────────────────────────────────────────────────────────
 log "🔐 Configuring SSH (root + password)..."
@@ -110,9 +118,8 @@ code{background:#e8e8e8;padding:2px 6px;border-radius:3px}
 <body>
 <h1>🖥️ RenderShell <span class="badge">GitHub Actions</span></h1>
 <div class="card">
-<h3>📡 Web Terminal (ttyd)</h3>
+<h3>📡 Web Terminal</h3>
 <p><code>https://${HOSTNAME}.&lt;your-tailnet&gt;.ts.net/</code></p>
-<p>Login: <code>root</code> / your ROOT_PASSWORD</p>
 </div>
 <div class="card">
 <h3>🔗 SSH Access</h3>
@@ -162,8 +169,9 @@ file=/tmp/supervisor.sock
 [supervisorctl]
 serverurl=unix:///tmp/supervisor.sock
 
-[program:ttyd]
-command=/usr/bin/ttyd -p 4200 -t disableResize=on tmux new -A -s render-shell
+[program:webshell]
+command=/usr/bin/python3 /usr/local/bin/webshell.py
+environment=WEBSHELL_PORT="4200"
 stdout_logfile=/dev/stdout
 stdout_logfile_maxbytes=0
 stderr_logfile=/dev/stderr
@@ -186,8 +194,7 @@ startretries=3
 priority=20
 SUPERVISOR
 
-# Replace password placeholder if present (ttyd no longer uses it)
-$SUDO sed -i "s/PASSWORD_HERE/${ROOT_PASSWORD}/g" /etc/supervisor/conf.d/render-shell.conf 2>/dev/null || true
+# (no password placeholders — Tailscale/WAF controls access)
 
 log "Supervisor config generated"
 
@@ -254,7 +261,7 @@ done
 log ""
 log "✅ RenderShell setup complete!"
 log ""
-log "   📡 Web Terminal:  https://${HOSTNAME}.<your-tailnet>.ts.net/  (login: root / ROOT_PASSWORD)"
+log "   📡 Web Terminal:  https://${HOSTNAME}.<your-tailnet>.ts.net/"
 log "   📊 Status:        http://localhost:8080"
 log "   🔗 SSH:          ssh root@${TAILSCALE_IP}"
 log ""

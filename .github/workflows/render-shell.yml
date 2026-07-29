@@ -3,7 +3,8 @@
 # =============================================================================
 # Spins up a RenderShell stack on a GitHub Actions runner:
 #   - Tailscale exit node (userspace mode)
-#   - Shellinabox web terminal (via Tailscale Serve on port 443 → 4200)
+#   - WebShell (Python WebSocket terminal on port 4200 via Tailscale Serve)
+#   - Tailscale Funnel (optional public internet exposure)
 #   - SSH daemon (runner's built-in, with root password auth)
 #   - HTTP status page (port 8080)
 #
@@ -17,6 +18,7 @@
 #
 # Optional secrets:
 #   TAILSCALE_HOSTNAME — custom hostname on your tailnet (default: render-shell)
+#   FUNNEL — set to "true" to expose web terminal publicly via Funnel
 # =============================================================================
 
 name: RenderShell
@@ -33,6 +35,11 @@ on:
         description: 'Tailscale hostname override'
         type: string
         default: ''
+        required: false
+      funnel:
+        description: 'Expose web terminal publicly via Tailscale Funnel'
+        type: boolean
+        default: false
         required: false
 
   schedule:
@@ -76,11 +83,12 @@ jobs:
           TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
           ROOT_PASSWORD: ${{ secrets.ROOT_PASSWORD }}
           TAILSCALE_HOSTNAME: ${{ inputs.hostname || secrets.TAILSCALE_HOSTNAME || 'render-shell' }}
+          REPO_ROOT: ${{ github.workspace }}
         run: |
           bash setup-github-actions.sh
           echo "started_at=$(date -u +%s)" >> $GITHUB_OUTPUT
 
-      - name: Tailscale Serve — expose web terminal
+      - name: Tailscale Serve + Funnel — expose web terminal
         run: |
           # Wait for tailscale to be fully connected
           echo "⏳ Waiting for tailscale to be ready..."
@@ -94,12 +102,29 @@ jobs:
 
           echo ""
           echo "🌐 Setting up Tailscale Serve..."
-          # Expose shellinabox web terminal on root path (port 443 → 4200)
+          # Expose web terminal on root path (port 443 → 4200)
           sudo tailscale serve --bg 4200 2>&1 || true
 
           echo ""
-          echo "🔗 Tailscale Serve config:"
+          echo "🔗 Tailscale Serve status:"
           sudo tailscale serve status
+
+          # ── Optional Funnel (public internet exposure) ────────────────
+          FUNNEL="${{ inputs.funnel == true && 'true' || '' }}"
+          if [ -z "$FUNNEL" ]; then
+            FUNNEL="${FUNNEL:-${{ secrets.FUNNEL }}}"
+          fi
+          if [ "${FUNNEL}" = "true" ]; then
+            echo ""
+            echo "🌍 Setting up Tailscale Funnel (public internet)..."
+            sudo tailscale funnel --bg 4200 2>&1 || warn "Funnel setup failed (may not be enabled in Tailscale admin)"
+            echo ""
+            echo "🌍 Funnel status:"
+            sudo tailscale funnel status 2>&1 || true
+          else
+            echo ""
+            echo "⏭️  Funnel not requested (set FUNNEL=true or pass funnel: true to enable)"
+          fi
 
       - name: Session Info
         env:
@@ -111,6 +136,13 @@ jobs:
             TAILNET=$(echo "$TS_STATUS" | head -1 | awk '{print $2}' | sed 's/.*@//')
           fi
 
+          # Check if Funnel is active
+          FUNNEL_ACTIVE=false
+          FUNNEL_STATUS=$(sudo tailscale funnel status 2>/dev/null || true)
+          if echo "$FUNNEL_STATUS" | grep -q "Funnel on"; then
+            FUNNEL_ACTIVE=true
+          fi
+
           echo "╔═══════════════════════════════════════════════════════════════╗"
           echo "║              🚀 RenderShell is LIVE                         ║"
           echo "╚═══════════════════════════════════════════════════════════════╝"
@@ -119,9 +151,10 @@ jobs:
           echo "   Tailnet:         ${TAILNET}"
           echo ""
           echo "   📡 Web Terminal:  https://${HOSTNAME}.${TAILNET}.ts.net/"
+          if [ "${FUNNEL_ACTIVE}" = "true" ]; then
+            echo "   🌍 Public URL:     https://${HOSTNAME}.${TAILNET}.ts.net/    (Funnel — anyone can access)"
+          fi
           echo "   📊 Status:        http://localhost:8080"
-          echo ""
-          echo "   Login:  root / <your ROOT_PASSWORD>"
           echo ""
           echo "   ⏱  Started: $(date -u)"
           echo "   ⏱  Expires: ~${{ inputs.duration_hours || 6 }} hours from now"
