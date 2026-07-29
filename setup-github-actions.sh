@@ -4,7 +4,7 @@
 # =============================================================================
 # Installs and configures on a GitHub Actions Ubuntu runner:
 #   - Tailscale (userspace networking, exit node)
-#   - Shellinabox (web terminal on port 4200)
+#   - TTYD (web terminal on port 4200, replaces shellinabox)
 #   - HTTP status page (on port 8080)
 #
 # Environment variables (set by the workflow from GitHub Secrets):
@@ -57,14 +57,25 @@ $SUDO apt-get update -qq
 $SUDO apt-get install -y -qq \
     supervisor \
     python3 \
-    shellinabox \
     curl \
     vim \
     nano \
     htop \
     2>&1 | tail -1
 
-log "Packages installed. shellinabox: $(shellinaboxd --version 2>&1 || true)"
+# Install ttyd (web terminal) — try apt first, fall back to binary download
+if ! command -v ttyd &>/dev/null; then
+    $SUDO apt-get install -y -qq ttyd 2>/dev/null || {
+        log "apt ttyd not available, downloading binary..."
+        $SUDO wget -q -O /usr/bin/ttyd \
+            https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.x86_64 2>/dev/null || \
+        $SUDO wget -q -O /usr/bin/ttyd \
+            https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64
+        $SUDO chmod +x /usr/bin/ttyd
+    }
+fi
+
+log "Packages installed. ttyd: $(ttyd --version 2>&1 || true)"
 
 # ── 3. Configure SSH ────────────────────────────────────────────────────────
 log "🔐 Configuring SSH (root + password)..."
@@ -98,8 +109,9 @@ code{background:#e8e8e8;padding:2px 6px;border-radius:3px}
 <body>
 <h1>🖥️ RenderShell <span class="badge">GitHub Actions</span></h1>
 <div class="card">
-<h3>📡 Web Terminal</h3>
+<h3>📡 Web Terminal (ttyd)</h3>
 <p><code>https://${HOSTNAME}.&lt;your-tailnet&gt;.ts.net/</code></p>
+<p>Login: <code>root</code> / your ROOT_PASSWORD</p>
 </div>
 <div class="card">
 <h3>🔗 SSH Access</h3>
@@ -149,8 +161,8 @@ file=/tmp/supervisor.sock
 [supervisorctl]
 serverurl=unix:///tmp/supervisor.sock
 
-[program:shellinabox]
-command=/usr/bin/shellinaboxd --disable-ssl --no-beep -s /:SSH:127.0.0.1:22 -p 4200
+[program:ttyd]
+command=/usr/bin/ttyd -p 4200 -c root:PASSWORD_HERE bash
 stdout_logfile=/dev/stdout
 stdout_logfile_maxbytes=0
 stderr_logfile=/dev/stderr
@@ -172,6 +184,9 @@ autorestart=true
 startretries=3
 priority=20
 SUPERVISOR
+
+# Replace password placeholder with actual value
+$SUDO sed -i "s/PASSWORD_HERE/${ROOT_PASSWORD}/g" /etc/supervisor/conf.d/render-shell.conf
 
 log "Supervisor config generated"
 
@@ -209,9 +224,20 @@ log "🚀 Starting services via supervisord..."
 $SUDO /usr/bin/supervisord -c /etc/supervisor/conf.d/render-shell.conf &
 echo $! | $SUDO tee /tmp/supervisord.pid > /dev/null
 
-sleep 3
+# ── 8. Wait for services to start ──────────────────────────────────────────
+log "⏳ Waiting for services to be ready..."
+for i in $(seq 1 10); do
+    READY=true
+    for port in 4200 8080; do
+        if ! ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+            READY=false
+        fi
+    done
+    $READY && break
+    sleep 2
+done
 
-# ── 8. Verify ──────────────────────────────────────────────────────────────
+# ── 9. Verify ──────────────────────────────────────────────────────────────
 log "═══════════════════════════════════════════════════════"
 log "🔍 Verifying services..."
 log "═══════════════════════════════════════════════════════"
@@ -227,7 +253,7 @@ done
 log ""
 log "✅ RenderShell setup complete!"
 log ""
-log "   📡 Web Terminal:  https://${HOSTNAME}.<your-tailnet>.ts.net/"
+log "   📡 Web Terminal:  https://${HOSTNAME}.<your-tailnet>.ts.net/  (login: root / ROOT_PASSWORD)"
 log "   📊 Status:        http://localhost:8080"
 log "   🔗 SSH:          ssh root@${TAILSCALE_IP}"
 log ""
