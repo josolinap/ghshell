@@ -28,6 +28,13 @@ log()  { echo -e "${GREEN}[setup]${NC} $*"; }
 warn() { echo -e "${YELLOW}[setup]${NC} $*"; }
 err()  { echo -e "${RED}[setup]${NC} $*" >&2; }
 
+# GitHub Actions runner runs as non-root → use sudo for system ops
+SUDO=''
+if [ "$(id -u)" != "0" ]; then
+    SUDO='sudo'
+    log "Running as non-root — using sudo for system operations"
+fi
+
 HOSTNAME="${TAILSCALE_HOSTNAME:-render-shell}"
 
 log "🚀 RenderShell setup starting on $(hostname)"
@@ -57,8 +64,8 @@ log "Tailscale $(tailscale --version 2>&1 | head -1)"
 # ── 2. Install system packages ──────────────────────────────────────────────
 log "📦 Installing system packages..."
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq \
+$SUDO apt-get update -qq
+$SUDO apt-get install -y -qq \
     ca-certificates \
     supervisor \
     python3 \
@@ -88,15 +95,15 @@ if ! command -v filebrowser &>/dev/null; then
 fi
 
 # Initialize filebrowser database
-filebrowser config init --database /etc/filebrowser.db 2>/dev/null || true
-filebrowser config set --database /etc/filebrowser.db \
+$SUDO filebrowser config init --database /etc/filebrowser.db 2>/dev/null || true
+$SUDO filebrowser config set --database /etc/filebrowser.db \
     --address 0.0.0.0 \
     --port 5800 \
     --root /root 2>/dev/null || true
-filebrowser users add --database /etc/filebrowser.db \
+$SUDO filebrowser users add --database /etc/filebrowser.db \
     admin "${FILEBROWSER_PASSWORD}" \
     --perm.admin 2>/dev/null || \
-filebrowser users update admin \
+$SUDO filebrowser users update admin \
     --password "${FILEBROWSER_PASSWORD}" \
     --database /etc/filebrowser.db 2>/dev/null || true
 
@@ -104,28 +111,28 @@ log "File Browser installed: $(filebrowser version 2>&1)"
 
 # ── 4. Configure SSH ────────────────────────────────────────────────────────
 log "🔐 Configuring SSH..."
-echo "root:${ROOT_PASSWORD}" | chpasswd
+echo "root:${ROOT_PASSWORD}" | $SUDO chpasswd
 
 # Ensure SSH allows root login with passwords
-sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-sed -i 's/^#*UsePAM.*/UsePAM yes/' /etc/ssh/sshd_config
-sed -i 's/^#*KbdInteractiveAuthentication.*/KbdInteractiveAuthentication yes/' /etc/ssh/sshd_config
+$SUDO sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+$SUDO sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+$SUDO sed -i 's/^#*UsePAM.*/UsePAM yes/' /etc/ssh/sshd_config
+$SUDO sed -i 's/^#*KbdInteractiveAuthentication.*/KbdInteractiveAuthentication yes/' /etc/ssh/sshd_config
 
 # Generate host keys if missing
 if [ ! -f /etc/ssh/ssh_host_rsa_key ]; then
-    ssh-keygen -A 2>/dev/null
+    $SUDO ssh-keygen -A 2>/dev/null
 fi
 
-mkdir -p /run/sshd
+$SUDO mkdir -p /run/sshd
 
 log "SSH configured for root login"
 
 # ── 5. Create status page ───────────────────────────────────────────────────
 log "🌐 Creating HTTP status page..."
-mkdir -p /workspace
+$SUDO mkdir -p /workspace
 
-cat > /workspace/index.html << 'HTML'
+$SUDO tee /workspace/index.html > /dev/null << 'HTML'
 <!DOCTYPE html>
 <html><head><title>RenderShell (GitHub Actions)</title>
 <style>
@@ -167,7 +174,7 @@ RenderShell running on GitHub Actions | <span id="uptime"></span>
 HTML
 
 # Simple system info endpoint
-cat > /workspace/sysinfo << 'SCRIPT'
+$SUDO tee /workspace/sysinfo > /dev/null << 'SCRIPT'
 #!/bin/bash
 echo "Hostname: $(hostname)"
 echo "Kernel: $(uname -r)"
@@ -177,15 +184,15 @@ echo "Memory: $(free -h | awk '/^Mem:/{print $3 "/" $2}')"
 echo "Disk: $(df -h / | awk 'NR==2{print $3 "/" $2}')"
 echo "Tailscale: $(tailscale status 2>/dev/null | head -3 || echo 'connecting...')"
 SCRIPT
-chmod +x /workspace/sysinfo
+$SUDO chmod +x /workspace/sysinfo
 
 log "Status page created"
 
 # ── 6. Generate supervisord config ─────────────────────────────────────────
 log "⚙️  Generating supervisord config..."
-mkdir -p /etc/supervisor/conf.d
+$SUDO mkdir -p /etc/supervisor/conf.d
 
-cat > /etc/supervisor/conf.d/render-shell.conf << 'SUPERVISOR'
+$SUDO tee /etc/supervisor/conf.d/render-shell.conf > /dev/null << 'SUPERVISOR'
 [supervisord]
 nodaemon=true
 user=root
@@ -248,10 +255,13 @@ log "Supervisor config generated"
 
 # ── 7. Start Tailscale ─────────────────────────────────────────────────────
 log "🔗 Starting Tailscale (userspace mode)..."
-nohup tailscaled --state=mem: --socket=/var/run/tailscale/tailscaled.sock \
+# Ensure socket directory exists
+$SUDO mkdir -p /var/run/tailscale
+
+$SUDO nohup tailscaled --state=mem: --socket=/var/run/tailscale/tailscaled.sock \
     --tun=userspace-networking > /tmp/tailscaled.log 2>&1 &
 TAILSCALED_PID=$!
-echo $TAILSCALED_PID > /tmp/tailscaled.pid
+echo $TAILSCALED_PID | $SUDO tee /tmp/tailscaled.pid > /dev/null
 
 # Wait for socket
 for i in $(seq 1 15); do
@@ -262,7 +272,7 @@ for i in $(seq 1 15); do
 done
 
 # Authenticate
-tailscale up \
+$SUDO tailscale up \
     --auth-key="${TAILSCALE_AUTHKEY}" \
     --advertise-exit-node \
     --accept-routes \
@@ -273,9 +283,9 @@ log "✅ Tailscale authenticated"
 
 # ── 8. Start services via supervisord ──────────────────────────────────────
 log "🚀 Starting all services via supervisord..."
-/usr/bin/supervisord -c /etc/supervisor/conf.d/render-shell.conf &
+$SUDO /usr/bin/supervisord -c /etc/supervisor/conf.d/render-shell.conf &
 SUPERVISORD_PID=$!
-echo $SUPERVISORD_PID > /tmp/supervisord.pid
+echo $SUPERVISORD_PID | $SUDO tee /tmp/supervisord.pid > /dev/null
 
 # Wait for services to be ready
 sleep 3

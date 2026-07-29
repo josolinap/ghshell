@@ -94,32 +94,32 @@ jobs:
         run: |
           echo "⏳ Waiting for tailscale to be ready..."
           for i in $(seq 1 30); do
-            if tailscale status 2>/dev/null | grep -q "$(tailscale status 2>/dev/null | head -1 | awk '{print $2}')"; then
+            if sudo tailscale status 2>/dev/null | grep -q "$(sudo tailscale status 2>/dev/null | head -1 | awk '{print $2}')"; then
               break
             fi
             sleep 2
           done
 
-          echo "✅ Tailscale is up"
-          tailscale status
+            echo "✅ Tailscale is up"
+          sudo tailscale status
 
           echo ""
           echo "🌐 Setting up Tailscale Serve..."
           # Expose shellinabox on root path (port 443 → 4200)
-          tailscale serve --bg 4200 2>&1 || true
+          sudo tailscale serve --bg 4200 2>&1 || true
           # Expose filebrowser on /files (port 443 → 5800)
-          tailscale serve --bg --set-path /files http://localhost:5800 2>&1 || true
+          sudo tailscale serve --bg --set-path /files http://localhost:5800 2>&1 || true
 
           echo ""
           echo "🔗 Tailscale Serve config:"
-          tailscale serve status
+          sudo tailscale serve status
 
       - name: Session Info
         shell: bash
         env:
           HOSTNAME: ${{ inputs.hostname || secrets.TAILSCALE_HOSTNAME || 'render-shell' }}
         run: |
-          TAILNET=$(tailscale status 2>/dev/null | head -1 | awk '{print $2}' | sed 's/.*@//')
+          TAILNET=$(sudo tailscale status 2>/dev/null | head -1 | awk '{print $2}' | sed 's/.*@//')
 
           echo "╔═══════════════════════════════════════════════════════════════╗"
           echo "║              🚀 RenderShell is LIVE                         ║"
@@ -185,7 +185,7 @@ jobs:
 
             # Heartbeat ping to prevent idle timeout
             curl -sf http://localhost:8080 >/dev/null 2>&1 || true
-            tailscale status >/dev/null 2>&1 || true
+            sudo tailscale status >/dev/null 2>&1 || true
             sleep 300  # Report every 5 minutes
             REMAINING=$(( (${END} - $(date -u +%s)) / 60 ))
             echo "❤️  ${REMAINING} minutes remaining..."
