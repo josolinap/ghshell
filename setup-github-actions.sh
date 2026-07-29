@@ -65,13 +65,13 @@ $SUDO apt-get install -y -qq \
 
 # Install ttyd (web terminal) — try apt first, fall back to binary download
 if ! command -v ttyd &>/dev/null; then
-    $SUDO apt-get install -y -qq ttyd 2>/dev/null || {
+    # Try apt first, then download static binary
+    $SUDO apt-get install -y -qq ttyd 2>/dev/null && log "ttyd installed via apt" || {
         log "apt ttyd not available, downloading binary..."
-        $SUDO wget -q -O /usr/bin/ttyd \
-            https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.x86_64 2>/dev/null || \
         $SUDO wget -q -O /usr/bin/ttyd \
             https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64
         $SUDO chmod +x /usr/bin/ttyd
+        log "ttyd binary downloaded"
     }
 fi
 
