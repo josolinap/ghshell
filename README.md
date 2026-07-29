@@ -207,21 +207,32 @@ tailscale up --exit-node=render-shell
 ### Workflow details
 
 - **Max runtime**: 6 hours per run (configurable via `duration_hours` input)
+- **Auto-retrigger**: Fires next session 2 min before expiry — infinite chain
+- **Fallback**: Cron schedule at 06/12/18 UTC catches any missed retriggers
 - **Trigger**: `workflow_dispatch` (manual) + `schedule` (cron)
 - **Files**: `.github/workflows/render-shell.yml` + `setup-github-actions.sh`
 - **Arch**: Installs natively on the runner (no Docker-in-Docker) — faster boot, simpler
 
-### Limitation: 6-hour max session
+### Auto-retrigger: Infinite 6-hour sessions
 
-GitHub Actions has a 6-hour limit for `workflow_dispatch` jobs on free/paid plans.
-For 24/7 coverage, the three daily cron runs overlap to cover most of the day:
+GitHub Actions has a 6-hour limit for `workflow_dispatch` jobs. The workflow
+**auto-triggers the next session 2 minutes before expiry**, creating an infinite
+chain of 6-hour sessions with practically no downtime:
+
 ```
-06:00 ────────── 12:00 UTC  (6h)
-         12:00 ────────── 18:00 UTC  (6h)
-                  18:00 ────────── 00:00 UTC  (6h)
+Session 1 ──────────────────────┐
+  06:00                    11:58 ├── 🔄 trigger next
+                                Session 2 ──────────────────────┐
+                                12:00                    17:58 ├── 🔄 trigger next
+                                                              Session 3 ─── ...
+                                                              18:00
 ```
-The 00:00–06:00 gap is covered by the overlap buffer (each run starts while the
-previous one is still active for ~1 minute).
+
+The cron schedule at 06/12/18 UTC acts as a **fallback** in case the auto-retrigger
+ever misses (e.g., during a GitHub API blip).
+
+**To stop the chain**, simply disable the workflow in the GitHub Actions UI or
+set `concurrency.cancel-in-progress: true` temporarily.
 
 ---
 
