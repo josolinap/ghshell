@@ -78,7 +78,6 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
       var fitAddon = new FitAddon.FitAddon();
       term.loadAddon(fitAddon);
-      term.loadAddon(new WebLinksAddon.WebLinksAddon());
       term.open(document.getElementById('terminal'));
       try { fitAddon.fit(); } catch(e) {}
 
