@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-WebShell — Simple WebSocket-based web terminal.
-Serves xterm.js on HTTP and bridges WebSocket to a PTY (bash).
-Works behind Tailscale Serve / Tailscale Funnel.
+WebShell v2 — HTTP Polling Terminal (no WebSocket).
+Uses simple GET/POST polling through xterm.js.
+Works through ANY HTTP proxy (Tailscale Serve, Funnel, nginx, etc.).
 """
 
 import asyncio
@@ -13,10 +13,11 @@ import os
 import pty
 import signal
 import struct
-import subprocess
 import sys
 import termios
+import time
 import tty as tty_mod
+from collections import deque
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -25,34 +26,10 @@ logging.basicConfig(
 )
 log = logging.getLogger("webshell")
 
-# ── Install websockets if missing ──────────────────────────────────────────
-try:
-    import websockets
-except ImportError:
-    log.info("websockets not found, installing...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "websockets", "-q"])
-    import websockets
-
-# Detect websockets version
-WS_MAJOR = int(getattr(websockets, "__version__", "0").split(".")[0])
-log.info(f"websockets version: {websockets.__version__} (major={WS_MAJOR})")
-
-if WS_MAJOR >= 13:
-    from websockets.http import HTTPResponse
-    HAS_HTTP_RESPONSE = True
-elif WS_MAJOR >= 10:
-    # Old-style: process_request returns a tuple or None
-    HAS_HTTP_RESPONSE = False
-else:
-    # Even older: direct handler
-    HAS_HTTP_RESPONSE = False
-
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("WEBSHELL_PORT", "4200"))
 
-log.info(f"WebShell starting on {HOST}:{PORT}")
-
-# ── Static HTML page with xterm.js ──────────────────────────────────────────
+# ── HTML page with xterm.js (polling-based) ───────────────────────────────
 INDEX_HTML = r"""<!DOCTYPE html>
 <html>
 <head>
@@ -67,25 +44,27 @@ INDEX_HTML = r"""<!DOCTYPE html>
     #status.connecting { background: #1a3a1a; color: #8f8; }
     #status.connected { background: #0a2a0a; color: #4f4; }
     #status.error { background: #3a1a1a; color: #f88; }
-    #status.disconnected { background: #2a2a1a; color: #ff8; }
     .term-container { height: calc(100vh - 2px); }
   </style>
 </head>
 <body>
-  <div id="status" class="connecting">⏳ Connecting to WebSocket...</div>
+  <div id="status" class="connecting">Starting terminal...</div>
   <div id="terminal" class="term-container"></div>
 
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.min.js"></script>
   <script>
     (function() {
-      var status = document.getElementById('status');
+      var statusEl = document.getElementById('status');
+      var lastSeq = 0;
+      var polling = false;
+
       function setStatus(state, msg) {
-        status.className = state;
-        status.textContent = msg;
+        statusEl.className = state;
+        statusEl.textContent = msg;
       }
 
+      // ── Terminal setup ───────────────────────────────────────────────
       var term = new Terminal({
         cursorBlink: true,
         cursorStyle: 'block',
@@ -101,77 +80,107 @@ INDEX_HTML = r"""<!DOCTYPE html>
       term.loadAddon(fitAddon);
       term.loadAddon(new WebLinksAddon.WebLinksAddon());
       term.open(document.getElementById('terminal'));
+      try { fitAddon.fit(); } catch(e) {}
 
-      var loc = window.location;
-      var wsUrl = (loc.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + loc.host + '/ws';
+      // ── Output poller ────────────────────────────────────────────────
+      function pollOutput() {
+        if (polling) return;
+        polling = true;
 
-      function connect() {
-        setStatus('connecting', '⏳ Connecting to ' + wsUrl + ' ...');
-        var ws = new WebSocket(wsUrl);
-
-        ws.onopen = function() {
-          setStatus('connected', '✅ Connected — terminal active');
-          term.reset();
-          term.focus();
-          try { fitAddon.fit(); } catch(e) {}
-        };
-
-        ws.onmessage = function(ev) {
-          if (ev.data instanceof Blob) {
-            var reader = new FileReader();
-            reader.onload = function() {
-              term.write(new Uint8Array(reader.result));
-            };
-            reader.readAsArrayBuffer(ev.data);
-          } else {
-            term.write(ev.data);
-          }
-        };
-
-        ws.onclose = function() {
-          setStatus('disconnected', '⚠️ Disconnected — retrying in 3s...');
-          term.write('\r\n\x1b[31m[Disconnected — reconnecting]\x1b[0m\r\n');
-          setTimeout(connect, 3000);
-        };
-
-        ws.onerror = function(err) {
-          setStatus('error', '❌ WebSocket error');
-          console.error('WebSocket error:', err);
-        };
-
-        term.onData(function(data) {
-          if (ws.readyState === WebSocket.OPEN) ws.send(data);
-        });
-
-        term.onResize(function(size) {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({type: 'resize', cols: size.cols, rows: size.rows}));
-          }
-        });
-
-        setTimeout(function() { try { fitAddon.fit(); } catch(e) {} }, 200);
+        fetch('/output?since=' + lastSeq)
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            if (data.data && data.data.length > 0) {
+              // Decode base64
+              var binary = atob(data.data);
+              var arr = new Uint8Array(binary.length);
+              for (var i = 0; i < binary.length; i++) {
+                arr[i] = binary.charCodeAt(i);
+              }
+              term.write(arr);
+              lastSeq = data.seq;
+            }
+            setStatus('connected', 'Connected');
+          })
+          .catch(function(err) {
+            setStatus('error', 'Connection error - retrying');
+            console.error('Poll error:', err);
+          })
+          .then(function() {
+            polling = false;
+            if (!term._disposed) {
+              setTimeout(pollOutput, 200);
+            }
+          });
       }
 
+      // ── Input sender ─────────────────────────────────────────────────
+      function sendInput(data) {
+        fetch('/input', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({data: data}),
+        }).catch(function(err) {
+          console.error('Input error:', err);
+        });
+      }
+
+      // ── Wire up terminal events ──────────────────────────────────────
+      term.onData(function(data) {
+        sendInput(data);
+      });
+
+      term.onResize(function(size) {
+        fetch('/resize', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({cols: size.cols, rows: size.rows}),
+        }).catch(function(err) {
+          console.error('Resize error:', err);
+        });
+      });
+
+      // ── Start ────────────────────────────────────────────────────────
+      setStatus('connecting', 'Starting terminal session...');
+
+      // Initial terminal connection: start the PTY
+      fetch('/start', {method: 'POST'})
+        .then(function(r) { return r.json(); })
+        .then(function(resp) {
+          if (resp.status === 'ok') {
+            setStatus('connected', 'Connected');
+            pollOutput();
+          } else {
+            setStatus('error', 'Failed to start: ' + (resp.error || 'unknown'));
+          }
+        })
+        .catch(function(err) {
+          setStatus('error', 'Failed to connect: ' + err.message);
+        });
+
+      // ── Window resize ────────────────────────────────────────────────
       window.addEventListener('resize', function() {
         try { fitAddon.fit(); } catch(e) {}
       });
-
-      connect();
     })();
   </script>
 </body>
 </html>"""
 
 
-# ── PTY Terminal Server ───────────────────────────────────────────────────
-class TerminalServer:
-    """Bridges a PTY (bash) to a WebSocket client."""
+# ── PTY Terminal Manager ──────────────────────────────────────────────────
+class PTYManager:
+    """Manages a single PTY session with output buffering."""
 
     def __init__(self):
-        self.child_fd = None
-        self.child_pid = None
+        self.pid = None
+        self.fd = None
         self.cols = 80
         self.rows = 24
+        self.output_buffer = deque()  # list of (seq, data_bytes)
+        self.seq = 0
+        self.lock = asyncio.Lock()
+        self._reader_task = None
 
     def set_winsize(self, fd, rows, cols):
         winsize = struct.pack("HHHH", rows, cols, 0, 0)
@@ -180,156 +189,266 @@ class TerminalServer:
         except OSError:
             pass
 
-    def spawn_pty(self):
+    def spawn(self):
+        """Spawn a new PTY with bash."""
+        if self.pid:
+            self.cleanup()
+
         pid, fd = pty.fork()
         if pid == 0:  # Child
             try:
                 os.setsid()
                 self.set_winsize(fd, self.rows, self.cols)
-                shell = os.environ.get("SHELL", "/bin/bash")
-                os.execvpe(shell, [shell, "--login"], os.environ)
+                # Use --norc --noprofile to avoid any bashrc issues
+                os.execvpe("/bin/bash", ["/bin/bash", "--norc", "--noprofile"], os.environ)
             except Exception as e:
                 log.error(f"Child exec failed: {e}")
                 os._exit(1)
         else:  # Parent
-            self.child_pid = pid
-            self.child_fd = fd
+            self.pid = pid
+            self.fd = fd
             try:
                 tty_mod.setraw(fd)
             except Exception:
                 pass
-            log.info(f"PTY spawned: pid={pid}")
+            log.info(f"PTY spawned: pid={pid}, fd={fd}")
             return fd
 
-    def read_pty(self):
+    def read_nonblock(self):
+        """Non-blocking read from PTY, appends to buffer."""
+        if self.fd is None:
+            return b""
         try:
-            return os.read(self.child_fd, 65536)
+            data = os.read(self.fd, 65536)
+            if data:
+                self.seq += len(data)
+                self.output_buffer.append((self.seq, data))
+                # Trim buffer to max 1MB
+                total = sum(len(d) for _, d in self.output_buffer)
+                while total > 1048576 and len(self.output_buffer) > 1:
+                    _, popped = self.output_buffer.popleft()
+                    total -= len(popped)
+            return data
         except (OSError, BlockingIOError):
             return b""
 
-    def write_pty(self, data: bytes):
+    def write(self, data: bytes):
+        """Write to PTY."""
+        if self.fd is None:
+            return
         try:
-            os.write(self.child_fd, data)
-        except OSError:
-            pass
+            os.write(self.fd, data)
+        except OSError as e:
+            log.warning(f"PTY write failed: {e}")
+
+    def get_output_since(self, since_seq: int):
+        """Get all output data since a given sequence number."""
+        result = b""
+        final_seq = since_seq
+        for seq, data in self.output_buffer:
+            if seq > since_seq:
+                result += data
+                final_seq = seq
+        return final_seq, result
 
     def cleanup(self):
-        if self.child_pid:
+        """Kill child and close PTY."""
+        if self.pid:
             try:
-                os.kill(self.child_pid, signal.SIGHUP)
-                os.waitpid(self.child_pid, 0)
+                os.kill(self.pid, signal.SIGHUP)
+                os.waitpid(self.pid, 0)
             except (ProcessLookupError, ChildProcessError, OSError):
                 pass
-            self.child_pid = None
-        if self.child_fd:
+            self.pid = None
+        if self.fd:
             try:
-                os.close(self.child_fd)
+                os.close(self.fd)
             except OSError:
                 pass
-            self.child_fd = None
+            self.fd = None
+        self.output_buffer.clear()
+        log.info("PTY cleaned up")
 
 
-# ── WebSocket Handler ─────────────────────────────────────────────────────
-async def handle_ws(websocket):
-    """Bridge PTY ↔ WebSocket for one client."""
-    log.info(f"New WebSocket connection")
-    ts = TerminalServer()
+# ── Global State ──────────────────────────────────────────────────────────
+pty_mgr = PTYManager()
+pty_mgr.spawn()  # Pre-spawn PTY on startup
 
+
+# ── Simple Async HTTP Server ─────────────────────────────────────────────
+async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    """Handle a single HTTP request."""
     try:
-        ts.spawn_pty()
+        request_line = await asyncio.wait_for(reader.readline(), timeout=10)
+        if not request_line:
+            writer.close()
+            return
+
+        request_str = request_line.decode("utf-8", errors="replace").strip()
+        if not request_str:
+            writer.close()
+            return
+
+        parts = request_str.split(" ")
+        if len(parts) < 2:
+            writer.close()
+            return
+
+        method = parts[0]
+        path = parts[1]
+        path_only = path.split("?")[0]  # Strip query params
+        query = {}
+        if "?" in path:
+            qs = path.split("?")[1]
+            for param in qs.split("&"):
+                if "=" in param:
+                    k, v = param.split("=", 1)
+                    query[k] = v
+
+        # Read headers and determine content length
+        content_length = 0
+        while True:
+            header_line = await asyncio.wait_for(reader.readline(), timeout=5)
+            header_str = header_line.decode("utf-8", errors="replace").strip()
+            if not header_str:
+                break
+            if header_str.lower().startswith("content-length:"):
+                content_length = int(header_str.split(":")[1].strip())
+
+        # Read body if present
+        body = b""
+        if content_length > 0:
+            body = await asyncio.wait_for(reader.readexactly(content_length), timeout=10)
+
+        # ── Route handling ──────────────────────────────────────────────
+        status = 200
+        resp_headers = {
+            "Content-Type": "text/plain",
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        }
+        resp_body = b""
+
+        if path_only == "/":
+            resp_headers["Content-Type"] = "text/html; charset=utf-8"
+            resp_body = INDEX_HTML.encode("utf-8")
+
+        elif path_only == "/health":
+            resp_body = b"OK"
+
+        elif path_only == "/start":
+            # Ensure PTY is running
+            if pty_mgr.pid is None or pty_mgr.fd is None:
+                try:
+                    pty_mgr.spawn()
+                    resp_body = json.dumps({"status": "ok"}).encode()
+                except Exception as e:
+                    resp_body = json.dumps({"status": "error", "error": str(e)}).encode()
+            else:
+                resp_body = json.dumps({"status": "ok"}).encode()
+
+        elif path_only == "/output":
+            since = int(query.get("since", "0"))
+            final_seq, data = pty_mgr.get_output_since(since)
+            # Base64 encode binary data for safe JSON transport
+            import base64
+            encoded = base64.b64encode(data).decode()
+            resp_headers["Content-Type"] = "application/json"
+            resp_body = json.dumps({"seq": final_seq, "data": encoded}).encode()
+
+        elif path_only == "/input":
+            if method == "POST" and body:
+                try:
+                    payload = json.loads(body.decode("utf-8"))
+                    data = payload.get("data", "")
+                    pty_mgr.write(data.encode("utf-8"))
+                    resp_body = b'{"status":"ok"}'
+                except (json.JSONDecodeError, KeyError) as e:
+                    resp_body = json.dumps({"status": "error", "error": str(e)}).encode()
+            else:
+                resp_body = b'{"status":"error","error":"no data"}'
+
+        elif path_only == "/resize":
+            if method == "POST" and body:
+                try:
+                    payload = json.loads(body.decode("utf-8"))
+                    pty_mgr.cols = int(payload.get("cols", pty_mgr.cols))
+                    pty_mgr.rows = int(payload.get("rows", pty_mgr.rows))
+                    if pty_mgr.fd:
+                        pty_mgr.set_winsize(pty_mgr.fd, pty_mgr.rows, pty_mgr.cols)
+                    resp_body = b'{"status":"ok"}'
+                except (json.JSONDecodeError, KeyError, ValueError) as e:
+                    resp_body = json.dumps({"status": "error", "error": str(e)}).encode()
+            else:
+                resp_body = b'{"status":"error","error":"no data"}'
+
+        elif path_only == "/debug":
+            resp_headers["Content-Type"] = "application/json"
+            debug_info = {
+                "pid": pty_mgr.pid,
+                "fd": pty_mgr.fd is not None,
+                "cols": pty_mgr.cols,
+                "rows": pty_mgr.rows,
+                "buffer_size": len(pty_mgr.output_buffer),
+                "total_seq": pty_mgr.seq,
+                "alive": pty_mgr.pid is not None,
+            }
+            # Check if process is alive
+            if pty_mgr.pid:
+                try:
+                    os.kill(pty_mgr.pid, 0)
+                    debug_info["process_alive"] = True
+                except OSError:
+                    debug_info["process_alive"] = False
+            resp_body = json.dumps(debug_info).encode()
+
+        else:
+            status = 404
+            resp_body = b"Not Found"
+
+        # Build and send response
+        status_text = {200: "OK", 400: "Bad Request", 404: "Not Found", 500: "Internal Server Error"}
+        resp_line = f"HTTP/1.1 {status} {status_text.get(status, 'Unknown')}\r\n"
+        resp_bytes = resp_line.encode()
+
+        for key, value in resp_headers.items():
+            resp_bytes += f"{key}: {value}\r\n".encode()
+        resp_bytes += f"Content-Length: {len(resp_body)}\r\n".encode()
+        resp_bytes += b"Connection: close\r\n"
+        resp_bytes += b"\r\n"
+        resp_bytes += resp_body
+
+        writer.write(resp_bytes)
+        await writer.drain()
+
     except Exception as e:
-        log.error(f"PTY spawn failed: {e}")
+        log.error(f"HTTP handler error: {e}")
         try:
-            await websocket.send(
-                f"\r\n\x1b[31mERROR: Failed to spawn terminal: {e}\x1b[0m\r\n".encode()
-            )
+            writer.write(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 2\r\n\r\n{}")
+            await writer.drain()
         except Exception:
             pass
-        return
-
-    loop = asyncio.get_event_loop()
-
-    async def pty_reader():
-        while True:
-            data = await loop.run_in_executor(None, ts.read_pty)
-            if data:
-                try:
-                    await websocket.send(data)
-                except websockets.ConnectionClosed:
-                    break
-            else:
-                await asyncio.sleep(0.01)
-
-    async def ws_reader():
-        try:
-            async for message in websocket:
-                if isinstance(message, str):
-                    if message.startswith("{"):
-                        try:
-                            msg = json.loads(message)
-                            if msg.get("type") == "resize":
-                                ts.cols = msg.get("cols", ts.cols)
-                                ts.rows = msg.get("rows", ts.rows)
-                                if ts.child_fd is not None:
-                                    ts.set_winsize(ts.child_fd, ts.rows, ts.cols)
-                                continue
-                        except (json.JSONDecodeError, KeyError):
-                            pass
-                    ts.write_pty(message.encode("utf-8"))
-                elif isinstance(message, bytes):
-                    ts.write_pty(message)
-        except websockets.ConnectionClosed:
-            pass
-        except Exception as e:
-            log.warning(f"ws_reader error: {e}")
-
-    try:
-        tasks = [asyncio.create_task(pty_reader()), asyncio.create_task(ws_reader())]
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        for t in pending:
-            t.cancel()
-    except Exception as e:
-        log.warning(f"Session error: {e}")
     finally:
-        ts.cleanup()
-        log.info("Session ended")
+        try:
+            writer.close()
+        except Exception:
+            pass
 
 
-# ── HTTP Request Router (version-agnostic) ─────────────────────────────────
-async def process_request(path, request_headers):
-    """Route HTTP requests. Return None to let WS handshake proceed."""
-    log.debug(f"HTTP request: {path}")
-
-    if path == "/ws":
-        return None  # Allow WebSocket upgrade
-
-    body = None
-    content_type = "text/plain"
-    status = 200
-
-    if path == "/":
-        body = INDEX_HTML.encode("utf-8")
-        content_type = "text/html; charset=utf-8"
-    elif path == "/health":
-        body = b"OK"
-    else:
-        body = b"Not Found"
-        status = 404
-
-    if HAS_HTTP_RESPONSE:
-        return HTTPResponse(
-            status=status,
-            headers={"Content-Type": content_type},
-            body=body,
-        )
-    else:
-        # Older websockets: return tuple (status, headers, body)
-        return (status, [(b"Content-Type", content_type.encode())], body)
+async def pty_reader_background():
+    """Background task: continuously read from PTY to fill buffer."""
+    while True:
+        try:
+            pty_mgr.read_nonblock()
+        except Exception as e:
+            log.error(f"PTY reader error: {e}")
+        await asyncio.sleep(0.01)  # 10ms polling for fresh output
 
 
-# ── Main ──────────────────────────────────────────────────────────────────
 async def main():
-    log.info(f"Starting server on {HOST}:{PORT}")
+    log.info(f"WebShell v2 starting on {HOST}:{PORT}")
 
     stop = asyncio.Future()
 
@@ -344,19 +463,18 @@ async def main():
         except NotImplementedError:
             pass
 
-    async with websockets.serve(
-        handle_ws,
-        HOST,
-        PORT,
-        process_request=process_request,
-        max_size=2**24,
-        ping_interval=30,
-        ping_timeout=10,
-        compression=None,
-    ):
-        log.info(f"✅ WebShell running on http://{HOST}:{PORT}")
+    # Start background PTY reader
+    asyncio.create_task(pty_reader_background())
+
+    server = await asyncio.start_server(handle_http, HOST, PORT)
+    addr = server.sockets[0].getsockname()
+    log.info(f"✅ WebShell v2 running on http://{addr[0]}:{addr[1]}")
+    log.info(f"   Polling terminal — no WebSocket required")
+
+    async with server:
         await stop
 
+    pty_mgr.cleanup()
     log.info("Server stopped")
 
 

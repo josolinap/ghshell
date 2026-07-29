@@ -64,14 +64,8 @@ $SUDO apt-get install -y -qq \
     tmux \
     2>&1 | tail -1
 
-# Install webshell dependencies (Python WebSocket terminal)
-log "Installing webshell dependencies..."
-pip3 install -U -q websockets 2>&1 | tail -1 || {
-    warn "pip install failed, trying apt..."
-    $SUDO apt-get install -y -qq python3-websockets 2>/dev/null || true
-}
-
-# Deploy webshell.py to /usr/local/bin/
+# Deploy webshell.py (HTTP polling terminal, no external deps needed)
+log "Deploying webshell (HTTP polling terminal)..."
 WEBSHELL_SRC="${REPO_ROOT:-.}/webshell.py"
 if [ -f "${WEBSHELL_SRC}" ]; then
     $SUDO cp "${WEBSHELL_SRC}" /usr/local/bin/webshell.py
@@ -84,7 +78,7 @@ else
 fi
 $SUDO chmod +x /usr/local/bin/webshell.py 2>/dev/null || true
 
-log "Packages installed. webshell: deployed"
+log "webshell deployed (pure Python stdlib — no external deps)"
 
 # ── 3. Configure SSH ────────────────────────────────────────────────────────
 log "🔐 Configuring SSH (root + password)..."
