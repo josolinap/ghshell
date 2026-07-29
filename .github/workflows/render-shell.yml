@@ -7,8 +7,9 @@
 #   - File Browser web file manager (via Tailscale Serve /files → 5800)
 #   - SSH daemon + HTTP status page
 #
-# Trigger: manual (workflow_dispatch) or scheduled keep-alive
-# Max run time: 6 hours (GitHub limit for workflow_dispatch on free tier)
+# AUTO-RETRIGGER: 2 minutes before the 6-hour limit, this workflow fires a
+# new `workflow_dispatch` to start the next session — creating an infinite
+# chain of 6-hour sessions with <2 min gap.
 #
 # Required secrets:
 #   TAILSCALE_AUTHKEY — reusable auth key (tskey-auth-xxxxx-xxxxx)
@@ -36,8 +37,7 @@ on:
         default: ''
         required: false
 
-  # Scheduled keep-alive — fires at 6am/12pm/6pm UTC daily
-  # Each run lasts ~6h, so 3 runs covers most of the day
+  # Scheduled keep-alive — fires at 6am/12pm/6pm UTC daily as backup
   schedule:
     - cron: '0 6,12,18 * * *'
 
@@ -68,6 +68,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.duration_hours != '' && fromJSON(inputs.duration_hours) * 60 || 360 }}
 
+    # Required so `gh workflow run` can dispatch the next session
+    permissions:
+      contents: write
+      actions: write
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -78,7 +83,7 @@ jobs:
           TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
           ROOT_PASSWORD: ${{ secrets.ROOT_PASSWORD }}
           FILEBROWSER_PASSWORD: ${{ secrets.FILEBROWSER_PASSWORD }}
-          TAILSCALE_HOSTNAME: ${{ inputs.hostname || 'render-shell' }}
+          TAILSCALE_HOSTNAME: ${{ inputs.hostname || secrets.TAILSCALE_HOSTNAME || 'render-shell' }}
         run: |
           bash setup-github-actions.sh
           echo "started_at=$(date -u +%s)" >> $GITHUB_OUTPUT
@@ -110,8 +115,9 @@ jobs:
 
       - name: Session Info
         shell: bash
+        env:
+          HOSTNAME: ${{ inputs.hostname || secrets.TAILSCALE_HOSTNAME || 'render-shell' }}
         run: |
-          HOSTNAME="${TAILSCALE_HOSTNAME:-render-shell}"
           TAILNET=$(tailscale status 2>/dev/null | head -1 | awk '{print $2}' | sed 's/.*@//')
 
           echo "╔═══════════════════════════════════════════════════════════════╗"
@@ -136,16 +142,38 @@ jobs:
       # ======================================================================
       # Keep-alive: the runner stays alive for the configured duration
       # A simple heartbeat loop prevents GH from considering it idle
+      # 2 minutes before expiry it auto-triggers the NEXT run so sessions
+      # chain together with <2 min gap.
       # ======================================================================
       - name: Keep Alive
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          END=$(( $(date -u +%s) + ${{ inputs.duration_hours != '' && fromJSON(inputs.duration_hours) * 3600 || 21600 }}))
+          DURATION_SECS=$(( ${{ inputs.duration_hours != '' && fromJSON(inputs.duration_hours) || 6 }} * 3600 ))
+          END=$(( $(date -u +%s) + DURATION_SECS ))
+          RETRIGGER_AT=$(( END - 120 ))  # Fire next run 2 minutes before expiry
 
           echo "🧠 Keeping runner alive until $(date -d @${END} -u)"
-          echo "   (max ${{ inputs.duration_hours || 6 }} hours)"
+          echo "   Duration: ${{ inputs.duration_hours || 6 }} hours"
+          echo "   Auto-retrigger at: $(date -d @${RETRIGGER_AT} -u)"
 
           while [ $(date -u +%s) -lt ${END} ]; do
+            NOW=$(date -u +%s)
+
+            # ── Retrigger window ──────────────────────────────────────────
+            if [ ${NOW} -ge ${RETRIGGER_AT} ] && [ ${NOW} -lt $(( RETRIGGER_AT + 90 )) ]; then
+              echo ""
+              echo "🔄 Auto-retriggering next RenderShell session..."
+              echo ""
+              # Dispatch the next run — this chains sessions indefinitely
+              gh workflow run "${GITHUB_WORKFLOW}" \
+                --ref "${GITHUB_REF_NAME}" \
+                ${{ inputs.hostname != '' && format('--field hostname={0}', inputs.hostname) || '' }} \
+                --field duration_hours=${{ inputs.duration_hours || 6 }} \
+                2>&1 && echo "✅ Next session triggered!" || echo "⚠️  Retrigger failed (will try again next loop)"
+            fi
+
             # Heartbeat ping to prevent idle timeout
             curl -sf http://localhost:8080 >/dev/null 2>&1 || true
             tailscale status >/dev/null 2>&1 || true
