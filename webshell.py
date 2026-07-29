@@ -338,7 +338,7 @@ async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
 
         elif path_only == "/start":
             # Ensure PTY is running
-            if pty_mgr.pid is None or pty_mgr.fd is None:
+            if pty_mgr.proc is None:
                 try:
                     pty_mgr.spawn()
                     resp_body = json.dumps({"status": "ok"}).encode()
@@ -374,8 +374,7 @@ async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
                     payload = json.loads(body.decode("utf-8"))
                     pty_mgr.cols = int(payload.get("cols", pty_mgr.cols))
                     pty_mgr.rows = int(payload.get("rows", pty_mgr.rows))
-                    if pty_mgr.fd:
-                        pty_mgr.set_winsize(pty_mgr.fd, pty_mgr.rows, pty_mgr.cols)
+                    # Resize not supported with script-based PTY (no TIOCSWINSZ)
                     resp_body = b'{"status":"ok"}'
                 except (json.JSONDecodeError, KeyError, ValueError) as e:
                     resp_body = json.dumps({"status": "error", "error": str(e)}).encode()
@@ -386,20 +385,15 @@ async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
             resp_headers["Content-Type"] = "application/json"
             debug_info = {
                 "pid": pty_mgr.pid,
-                "fd": pty_mgr.fd is not None,
+                "alive": pty_mgr.proc is not None and pty_mgr.proc.poll() is None,
                 "cols": pty_mgr.cols,
                 "rows": pty_mgr.rows,
                 "buffer_size": len(pty_mgr.output_buffer),
                 "total_seq": pty_mgr.seq,
-                "alive": pty_mgr.pid is not None,
+                "alive": pty_mgr.proc is not None,
             }
-            # Check if process is alive
-            if pty_mgr.pid:
-                try:
-                    os.kill(pty_mgr.pid, 0)
-                    debug_info["process_alive"] = True
-                except OSError:
-                    debug_info["process_alive"] = False
+            if pty_mgr.proc:
+                debug_info["process_alive"] = pty_mgr.proc.poll() is None
             resp_body = json.dumps(debug_info).encode()
 
         else:
