@@ -116,35 +116,16 @@ jobs:
           fi
           if [ "${FUNNEL}" = "true" ]; then
             echo ""
-            echo "🌍 Setting up Tailscale Funnel (public internet)..."
-
-            # The command returns immediately but Funnel can take a moment
-            # to establish the relay → runner path.  We'll wait until the
-            # Funnel status shows it's healthy before continuing.
-            timeout 60 sudo tailscale funnel --bg 4200 2>&1 || {
-              echo "⚠️  Funnel status NEVER reported healthy.  It might still work,"
-              echo "    but traffic may be slow until the relay path stabilises."
-            }
-
-            echo ""
-            for i in $(seq 1 30); do
-              FUNNEL_STATUS=$(sudo tailscale funnel status 2>/dev/null || true)
-              if echo "$FUNNEL_STATUS" | grep -q "on"; then
-                echo "🌍 Funnel ready ($(date -u))"
-                echo "$FUNNEL_STATUS"
-                break
-              else
-                echo "   waiting for funnel to report 'on'... attempt $i/30"
-                sleep 2
-              fi
-            done
-
-            echo ""
-            echo "🌍 Funnel status:"
-            sudo tailscale funnel status 2>&1 || true
+            echo "🌍 Attempting Tailscale Funnel (public internet)..."
+            # Fire-and-forget — never block the workflow.
+            # Funnel requires admin approval first.  If it fails, Serve still works.
+            nohup sudo tailscale funnel --bg 4200 >/tmp/funnel.log 2>&1 &
+            echo "   Funnel kicked off in background (see /tmp/funnel.log)."
+            echo "   The Serve URL will still be available regardless."
           else
             echo ""
-            echo "⏭️  Funnel not requested (set FUNNEL=true or pass funnel: true to enable)"
+            echo "⏭️  Funnel not enabled."
+            echo "   Pass 'funnel: true' at dispatch to expose the terminal publicly."
           fi
 
       - name: Session Info
@@ -157,13 +138,6 @@ jobs:
             TAILNET=$(echo "$TS_STATUS" | head -1 | awk '{print $2}' | sed 's/.*@//')
           fi
 
-          # Check if Funnel is active
-          FUNNEL_ACTIVE=false
-          FUNNEL_STATUS=$(sudo tailscale funnel status 2>/dev/null || true)
-          if echo "$FUNNEL_STATUS" | grep -q "Funnel on"; then
-            FUNNEL_ACTIVE=true
-          fi
-
           echo "╔═══════════════════════════════════════════════════════════════╗"
           echo "║              🚀 RenderShell is LIVE                         ║"
           echo "╚═══════════════════════════════════════════════════════════════╝"
@@ -172,10 +146,10 @@ jobs:
           echo "   Tailnet:         ${TAILNET}"
           echo ""
           echo "   📡 Web Terminal:  https://${HOSTNAME}.${TAILNET}.ts.net/"
-          if [ "${FUNNEL_ACTIVE}" = "true" ]; then
-            echo "   🌍 Public URL:     https://${HOSTNAME}.${TAILNET}.ts.net/    (Funnel — anyone can access)"
-          fi
-          echo "   📊 Status:        http://localhost:8080"
+          echo "   📊 Status page:   http://localhost:8080"
+          echo ""
+          echo "   ℹ️  If funnel was requested, it may take a minute to activate."
+          echo "        The Serve URL above always works for approved tailnet peers."
           echo ""
           echo "   ⏱  Started: $(date -u)"
           echo "   ⏱  Expires: ~${{ inputs.duration_hours || 6 }} hours from now"
@@ -200,6 +174,14 @@ jobs:
           HOSTNAME_OVERRIDE="${{ inputs.hostname }}"
           if [ -n "${HOSTNAME_OVERRIDE}" ]; then
             RETRIGGER_FLAGS="${RETRIGGER_FLAGS} --field hostname=${HOSTNAME_OVERRIDE}"
+          fi
+          # Preserve funnel flag
+          FUNNEL_RETRIGGER="${{ inputs.funnel == true && 'true' || '' }}"
+          if [ -z "$FUNNEL_RETRIGGER" ]; then
+            FUNNEL_RETRIGGER="${FUNNEL:-${{ secrets.FUNNEL }}}"
+          fi
+          if [ "${FUNNEL_RETRIGGER}" = "true" ]; then
+            RETRIGGER_FLAGS="${RETRIGGER_FLAGS} --field funnel=true"
           fi
 
           echo "🧠 Keeping runner alive until $(date -d @${END} -u)"
