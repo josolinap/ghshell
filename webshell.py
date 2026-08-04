@@ -237,7 +237,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
       setStatus('connecting', 'Starting terminal session...');
 
       function tryStart(retries) {
-        doFetch('/start', {method: 'POST', headers: getAuthHeaders()})
+        var url = '/start';
+        if (authToken) {
+          url += '?token=' + encodeURIComponent(authToken);
+        }
+        doFetch(url, {method: 'POST', headers: getAuthHeaders()})
           .then(function(r) { return r.json(); })
           .then(function(resp) {
             if (resp.status === 'ok') {
