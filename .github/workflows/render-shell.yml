@@ -19,6 +19,7 @@
 # Optional secrets:
 #   TAILSCALE_HOSTNAME — custom hostname on your tailnet (default: render-shell)
 #   FUNNEL — set to "true" to expose web terminal publicly via Funnel
+#   WEBSHELL_TOKEN — token for web terminal auth (auto-generated if not set)
 # =============================================================================
 
 name: RenderShell
@@ -41,6 +42,11 @@ on:
         type: boolean
         default: false
         required: false
+      webshell_token:
+        description: 'Token for web terminal auth (optional, auto-generated if not provided)'
+        type: string
+        default: ''
+        required: false
 
   schedule:
     - cron: '0 6,12,18 * * *'
@@ -53,11 +59,23 @@ on:
       hostname:
         type: string
         default: ''
+      funnel:
+        type: boolean
+        default: false
+      webshell_token:
+        type: string
+        default: ''
     secrets:
       TAILSCALE_AUTHKEY:
         required: true
       ROOT_PASSWORD:
         required: true
+      TAILSCALE_HOSTNAME:
+        required: false
+      FUNNEL:
+        required: false
+      WEBSHELL_TOKEN:
+        required: false
 
 concurrency:
   group: render-shell
@@ -83,6 +101,7 @@ jobs:
           TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
           ROOT_PASSWORD: ${{ secrets.ROOT_PASSWORD }}
           TAILSCALE_HOSTNAME: ${{ inputs.hostname || secrets.TAILSCALE_HOSTNAME || 'render-shell' }}
+          WEBSHELL_TOKEN: ${{ inputs.webshell_token != '' && inputs.webshell_token || secrets.WEBSHELL_TOKEN }}
           REPO_ROOT: ${{ github.workspace }}
         run: |
           bash setup-github-actions.sh
@@ -105,9 +124,23 @@ jobs:
           # Expose web terminal on root path (port 443 → 4200)
           sudo tailscale serve --bg 4200 2>&1 || true
 
+          # Verify serve is working
           echo ""
           echo "🔗 Tailscale Serve status:"
           sudo tailscale serve status
+          
+          # Test that the serve endpoint is reachable
+          echo ""
+          echo "🔍 Verifying serve endpoint..."
+          TAILNET=$(sudo tailscale status 2>/dev/null | head -1 | awk '{print $2}' | sed 's/.*@//')
+          HOSTNAME="${{ inputs.hostname || secrets.TAILSCALE_HOSTNAME || 'render-shell' }}"
+          SERVE_URL="https://${HOSTNAME}.${TAILNET}.ts.net"
+          if curl -sf -o /dev/null --max-time 10 "$SERVE_URL" 2>/dev/null; then
+            echo "✅ Serve endpoint reachable: $SERVE_URL"
+          else
+            echo "⚠️  Serve endpoint not yet reachable (may take a moment): $SERVE_URL"
+            echo "   This is normal — Tailscale Serve propagation can take 10-30 seconds."
+          fi
 
           # ── Funnel (public internet exposure) ────────────────────────
           FUNNEL="${{ inputs.funnel == true && 'true' || '' }}"
@@ -131,6 +164,7 @@ jobs:
       - name: Session Info
         env:
           HOSTNAME: ${{ inputs.hostname || secrets.TAILSCALE_HOSTNAME || 'render-shell' }}
+          WEBSHELL_TOKEN: ${{ inputs.webshell_token != '' && inputs.webshell_token || secrets.WEBSHELL_TOKEN }}
         run: |
           TAILNET=""
           TS_STATUS=$(sudo tailscale status 2>/dev/null || true)
@@ -146,6 +180,10 @@ jobs:
           echo "   Tailnet:         ${TAILNET}"
           echo ""
           echo "   📡 Web Terminal:  https://${HOSTNAME}.${TAILNET}.ts.net/"
+          if [ -n "${WEBSHELL_TOKEN}" ]; then
+            echo "   🔑 With token:     https://${HOSTNAME}.${TAILNET}.ts.net/?token=${WEBSHELL_TOKEN}"
+            echo "   💡 Bookmark the above URL — token is stored in browser cookie"
+          fi
           echo "   📊 Status page:   http://localhost:8080"
           echo ""
           echo "   ℹ️  If funnel was requested, it may take a minute to activate."
@@ -164,6 +202,7 @@ jobs:
       - name: Keep Alive
         env:
           GH_TOKEN: ${{ github.token }}
+          WEBSHELL_TOKEN: ${{ inputs.webshell_token != '' && inputs.webshell_token || secrets.WEBSHELL_TOKEN }}
         run: |
           DURATION_HOURS=${{ inputs.duration_hours != '' && inputs.duration_hours || '6' }}
           DURATION_SECS=$(( DURATION_HOURS * 3600 ))
@@ -183,6 +222,10 @@ jobs:
           if [ "${FUNNEL_RETRIGGER}" = "true" ]; then
             RETRIGGER_FLAGS="${RETRIGGER_FLAGS} --field funnel=true"
           fi
+          # Preserve webshell token
+          if [ -n "${WEBSHELL_TOKEN}" ]; then
+            RETRIGGER_FLAGS="${RETRIGGER_FLAGS} --field webshell_token=${WEBSHELL_TOKEN}"
+          fi
 
           echo "🧠 Keeping runner alive until $(date -d @${END} -u)"
           echo "   Duration: ${DURATION_HOURS} hours"
@@ -201,12 +244,22 @@ jobs:
                 2>&1 && echo "✅ Next session triggered!" || echo "⚠️  Retrigger failed"
             fi
 
-            # Heartbeat — prevents GitHub from considering the runner idle
-            curl -sf http://localhost:8080 >/dev/null 2>&1 || true
-            sudo tailscale status >/dev/null 2>&1 || true
+            # Health checks — verify services are still running
+            HEALTH_OK=true
+            curl -sf http://localhost:8080 >/dev/null 2>&1 || HEALTH_OK=false
+            sudo tailscale status >/dev/null 2>&1 || HEALTH_OK=false
+            curl -sf http://localhost:4200/health >/dev/null 2>&1 || HEALTH_OK=false
+            
+            # Verify Tailscale Serve is still configured
+            sudo tailscale serve status >/dev/null 2>&1 || HEALTH_OK=false
+
+            if [ "$HEALTH_OK" = false ]; then
+              echo "⚠️  Health check failed — some services may be down"
+            fi
+
             sleep 300
             REMAINING=$(( (${END} - $(date -u +%s)) / 60 ))
-            echo "❤️  ${REMAINING} minutes remaining..."
+            echo "❤️  ${REMAINING} minutes remaining... (health: $([ "$HEALTH_OK" = true ] && echo "OK" || echo "DEGRADED"))"
           done
 
           echo "⏰ Session complete."

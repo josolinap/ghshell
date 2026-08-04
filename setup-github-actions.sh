@@ -11,21 +11,25 @@
 #   TAILSCALE_AUTHKEY     — required, reusable auth key
 #   ROOT_PASSWORD         — required, password for root SSH login
 #   TAILSCALE_HOSTNAME    — optional, default: render-shell
+#   WEBSHELL_TOKEN        — optional, token for web terminal auth
 # =============================================================================
 
 set -euo pipefail
 
 # ── Colors ──────────────────────────────────────────────────────────────────
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
 NC='\033[0m'
-log()  { echo -e "${GREEN}[setup]${NC} $*"; }
+log() { echo -e "${GREEN}[setup]${NC} $*"; }
 warn() { echo -e "${YELLOW}[setup]${NC} $*"; }
-err()  { echo -e "${RED}[setup]${NC} $*" >&2; }
+err() { echo -e "${RED}[setup]${NC} $*" >&2; }
 
 # GitHub Actions runner runs as non-root → use sudo
 SUDO=''
 if [ "$(id -u)" != "0" ]; then
-    SUDO='sudo'
+  SUDO='sudo'
 fi
 
 HOSTNAME="${TAILSCALE_HOSTNAME:-render-shell}"
@@ -35,18 +39,18 @@ log "Target hostname: ${HOSTNAME}"
 
 # ── Validate secrets ─────────────────────────────────────────────────────────
 if [ -z "${TAILSCALE_AUTHKEY:-}" ]; then
-    err "TAILSCALE_AUTHKEY is not set!"
-    exit 1
+  err "TAILSCALE_AUTHKEY is not set!"
+  exit 1
 fi
 if [ -z "${ROOT_PASSWORD:-}" ]; then
-    warn "ROOT_PASSWORD not set — using 'change-me'"
-    ROOT_PASSWORD="change-me"
+  warn "ROOT_PASSWORD not set — using 'change-me'"
+  ROOT_PASSWORD="change-me"
 fi
 
 # ── 1. Install Tailscale ────────────────────────────────────────────────────
 log "📡 Installing Tailscale..."
 if ! command -v tailscale &>/dev/null; then
-    curl -fsSL https://tailscale.com/install.sh | sh
+  curl -fsSL https://tailscale.com/install.sh | sh
 fi
 log "Tailscale $(tailscale --version 2>&1 | head -1)"
 
@@ -55,26 +59,26 @@ log "📦 Installing system packages..."
 export DEBIAN_FRONTEND=noninteractive
 $SUDO apt-get update -qq
 $SUDO apt-get install -y -qq \
-    supervisor \
-    python3 \
-    curl \
-    vim \
-    nano \
-    htop \
-    tmux \
-    2>&1 | tail -1
+  supervisor \
+  python3 \
+  curl \
+  vim \
+  nano \
+  htop \
+  tmux \
+  2>&1 | tail -1
 
 # Deploy webshell.py (HTTP polling terminal, no external deps needed)
 log "Deploying webshell (HTTP polling terminal)..."
 WEBSHELL_SRC="${REPO_ROOT:-.}/webshell.py"
 if [ -f "${WEBSHELL_SRC}" ]; then
-    $SUDO cp "${WEBSHELL_SRC}" /usr/local/bin/webshell.py
-    log "Deployed webshell.py from ${WEBSHELL_SRC}"
+  $SUDO cp "${WEBSHELL_SRC}" /usr/local/bin/webshell.py
+  log "Deployed webshell.py from ${WEBSHELL_SRC}"
 elif [ -f "./webshell.py" ]; then
-    $SUDO cp ./webshell.py /usr/local/bin/webshell.py
+  $SUDO cp ./webshell.py /usr/local/bin/webshell.py
 else
-    warn "webshell.py not found in repo checkout!"
-    warn "Web terminal will not be available."
+  warn "webshell.py not found in repo checkout!"
+  warn "Web terminal will not be available."
 fi
 $SUDO chmod +x /usr/local/bin/webshell.py 2>/dev/null || true
 
@@ -97,7 +101,7 @@ log "SSH configured for root login on port 22"
 log "🌐 Creating HTTP status page..."
 $SUDO mkdir -p /workspace
 
-$SUDO tee /workspace/index.html > /dev/null << 'HTML'
+$SUDO tee /workspace/index.html >/dev/null <<'HTML'
 <!DOCTYPE html>
 <html><head><title>RenderShell (GitHub Actions)</title>
 <style>
@@ -130,7 +134,7 @@ fetch('/sysinfo').then(r=>r.text()).then(t=>document.getElementById('sysinfo').t
 </body></html>
 HTML
 
-$SUDO tee /workspace/sysinfo > /dev/null << 'SCRIPT'
+$SUDO tee /workspace/sysinfo >/dev/null <<'SCRIPT'
 #!/bin/bash
 echo "Hostname: $(hostname)"
 echo "Kernel: $(uname -r)"
@@ -148,7 +152,7 @@ log "Status page created"
 log "⚙️  Generating supervisord config..."
 $SUDO mkdir -p /etc/supervisor/conf.d
 
-$SUDO tee /etc/supervisor/conf.d/render-shell.conf > /dev/null << 'SUPERVISOR'
+$SUDO tee /etc/supervisor/conf.d/render-shell.conf >/dev/null <<'SUPERVISOR'
 [supervisord]
 nodaemon=true
 user=root
@@ -165,7 +169,7 @@ serverurl=unix:///tmp/supervisor.sock
 
 [program:webshell]
 command=/usr/bin/python3 /usr/local/bin/webshell.py
-environment=WEBSHELL_PORT="4200"
+environment=WEBSHELL_PORT="4200",WEBSHELL_TOKEN="${WEBSHELL_TOKEN:-}"
 stdout_logfile=/dev/stdout
 stdout_logfile_maxbytes=0
 stderr_logfile=/dev/stderr
@@ -197,25 +201,25 @@ log "🔗 Starting Tailscale (userspace mode)..."
 $SUDO mkdir -p /var/run/tailscale
 
 $SUDO nohup tailscaled --state=mem: --socket=/var/run/tailscale/tailscaled.sock \
-    --tun=userspace-networking > /tmp/tailscaled.log 2>&1 &
+  --tun=userspace-networking >/tmp/tailscaled.log 2>&1 &
 TAILSCALED_PID=$!
-echo $TAILSCALED_PID | $SUDO tee /tmp/tailscaled.pid > /dev/null
+echo $TAILSCALED_PID | $SUDO tee /tmp/tailscaled.pid >/dev/null
 
 # Wait for socket
 for i in $(seq 1 15); do
-    if [ -S /var/run/tailscale/tailscaled.sock ]; then
-        break
-    fi
-    sleep 1
+  if [ -S /var/run/tailscale/tailscaled.sock ]; then
+    break
+  fi
+  sleep 1
 done
 
 # Authenticate
 $SUDO tailscale up \
-    --auth-key="${TAILSCALE_AUTHKEY}" \
-    --advertise-exit-node \
-    --accept-routes \
-    --reset \
-    --hostname="${HOSTNAME}" 2>&1
+  --auth-key="${TAILSCALE_AUTHKEY}" \
+  --advertise-exit-node \
+  --accept-routes \
+  --reset \
+  --hostname="${HOSTNAME}" 2>&1
 
 log "✅ Tailscale authenticated"
 TAILSCALE_IP=$($SUDO tailscale ip -4 2>/dev/null || echo "waiting...")
@@ -224,19 +228,19 @@ log "   Tailscale IP: ${TAILSCALE_IP}"
 # ── 7. Start supervisord services ──────────────────────────────────────────
 log "🚀 Starting services via supervisord..."
 $SUDO /usr/bin/supervisord -c /etc/supervisor/conf.d/render-shell.conf &
-echo $! | $SUDO tee /tmp/supervisord.pid > /dev/null
+echo $! | $SUDO tee /tmp/supervisord.pid >/dev/null
 
 # ── 8. Wait for services to start ──────────────────────────────────────────
 log "⏳ Waiting for services to be ready..."
 for i in $(seq 1 10); do
-    READY=true
-    for port in 4200 8080; do
-        if ! ss -tlnp 2>/dev/null | grep -q ":${port} "; then
-            READY=false
-        fi
-    done
-    $READY && break
-    sleep 2
+  READY=true
+  for port in 4200 8080; do
+    if ! ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+      READY=false
+    fi
+  done
+  $READY && break
+  sleep 2
 done
 
 # ── 9. Verify ──────────────────────────────────────────────────────────────
@@ -245,11 +249,11 @@ log "🔍 Verifying services..."
 log "═══════════════════════════════════════════════════════"
 
 for port in 4200 8080; do
-    if ss -tlnp 2>/dev/null | grep -q ":${port} "; then
-        log "  ✅ Port ${port} — listening"
-    else
-        warn "  ⚠️  Port ${port} — NOT listening"
-    fi
+  if ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+    log "  ✅ Port ${port} — listening"
+  else
+    warn "  ⚠️  Port ${port} — NOT listening"
+  fi
 done
 
 log ""

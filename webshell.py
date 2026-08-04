@@ -25,6 +25,41 @@ log = logging.getLogger("webshell")
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("WEBSHELL_PORT", "4200"))
 
+# ── Optional Token Auth ───────────────────────────────────────────────────
+# Set WEBSHELL_TOKEN env var to enable. Token can be passed via:
+#   - Query param: ?token=xxx
+#   - Header: X-Webshell-Token: xxx
+#   - Cookie: webshell_token=xxx
+# If not set, no auth required (open access on Tailnet)
+AUTH_TOKEN = os.environ.get("WEBSHELL_TOKEN")
+
+
+def check_auth(query: dict, headers: dict) -> bool:
+    """Check if request has valid auth token. Returns True if allowed."""
+    if not AUTH_TOKEN:
+        return True  # No token configured = open access
+
+    # Check query param
+    if query.get("token") == AUTH_TOKEN:
+        return True
+
+    # Check header
+    auth_header = headers.get("x-webshell-token", "").strip()
+    if auth_header == AUTH_TOKEN:
+        return True
+
+    # Check cookie
+    cookie_header = headers.get("cookie", "")
+    if cookie_header:
+        for part in cookie_header.split(";"):
+            part = part.strip()
+            if part.startswith("webshell_token="):
+                if part.split("=", 1)[1] == AUTH_TOKEN:
+                    return True
+
+    return False
+
+
 # ── HTML page with xterm.js (polling-based) ───────────────────────────────
 INDEX_HTML = r"""<!DOCTYPE html>
 <html>
@@ -55,6 +90,25 @@ INDEX_HTML = r"""<!DOCTYPE html>
       var lastSeq = 0;
       var polling = false;
 
+      // ── Token handling ──────────────────────────────────────────────────
+      // Read token from URL query param (?token=xxx), store in cookie for subsequent requests
+      function getTokenFromUrl() {
+        var params = new URLSearchParams(window.location.search);
+        return params.get('token');
+      }
+      function setTokenCookie(token) {
+        // Session cookie (expires when browser closes), Secure for HTTPS, SameSite=Lax for Tailnet
+        document.cookie = 'webshell_token=' + encodeURIComponent(token) + '; path=/; Secure; SameSite=Lax';
+      }
+      function getTokenCookie() {
+        var match = document.cookie.match(/(?:^|; )webshell_token=([^;]*)/);
+        return match ? decodeURIComponent(match[1]) : null;
+      }
+      var authToken = getTokenFromUrl() || getTokenCookie();
+      if (authToken) {
+        setTokenCookie(authToken);  // Refresh cookie
+      }
+
       function setStatus(state, msg) {
         statusEl.className = state;
         statusEl.textContent = msg;
@@ -84,8 +138,23 @@ INDEX_HTML = r"""<!DOCTYPE html>
       var fetchTimeoutMs = 15000;  // individual fetch timeout
       var errorsSinceSuccess = 0;
 
+      function getAuthHeaders() {
+        var headers = {'Content-Type': 'application/json'};
+        if (authToken) {
+          headers['X-Webshell-Token'] = authToken;
+        }
+        return headers;
+      }
+
       function doFetch(url, opts) {
         opts = opts || {};
+        // Add auth header if token exists
+        if (authToken && !opts.headers) {
+          opts.headers = {};
+        }
+        if (authToken) {
+          opts.headers['X-Webshell-Token'] = authToken;
+        }
         var ctrl = new AbortController();
         opts.signal = ctrl.signal;
         var timer = setTimeout(function() { ctrl.abort(); }, fetchTimeoutMs);
@@ -103,7 +172,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
         if (polling) return;
         polling = true;
 
-        doFetch('/output?since=' + lastSeq)
+        var url = '/output?since=' + lastSeq;
+        if (authToken) {
+          url += '&token=' + encodeURIComponent(authToken);  // Also pass as query param for redundancy
+        }
+        doFetch(url)
           .then(function(r) { return r.json(); })
           .then(function(data) {
             if (data.data && data.data.length > 0) {
@@ -138,7 +211,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
       function sendInput(data) {
         doFetch('/input', {
           method: 'POST',
-          headers: {'Content-Type': 'application/json'},
+          headers: getAuthHeaders(),
           body: JSON.stringify({data: data}),
         }).catch(function(err) {
           console.error('Input error:', err);
@@ -153,7 +226,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
       term.onResize(function(size) {
         doFetch('/resize', {
           method: 'POST',
-          headers: {'Content-Type': 'application/json'},
+          headers: getAuthHeaders(),
           body: JSON.stringify({cols: size.cols, rows: size.rows}),
         }).catch(function(err) {
           console.error('Resize error:', err);
@@ -164,7 +237,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
       setStatus('connecting', 'Starting terminal session...');
 
       function tryStart(retries) {
-        doFetch('/start', {method: 'POST'})
+        doFetch('/start', {method: 'POST', headers: getAuthHeaders()})
           .then(function(r) { return r.json(); })
           .then(function(resp) {
             if (resp.status === 'ok') {
@@ -339,6 +412,7 @@ async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
 
         # Read headers and determine content length
         content_length = 0
+        headers = {}
         while True:
             header_line = await asyncio.wait_for(reader.readline(), timeout=5)
             header_str = header_line.decode("utf-8", errors="replace").strip()
@@ -346,11 +420,17 @@ async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
                 break
             if header_str.lower().startswith("content-length:"):
                 content_length = int(header_str.split(":")[1].strip())
+            # Store all headers (lowercase keys for case-insensitive lookup)
+            if ":" in header_str:
+                k, v = header_str.split(":", 1)
+                headers[k.lower().strip()] = v.strip()
 
         # Read body if present
         body = b""
         if content_length > 0:
-            body = await asyncio.wait_for(reader.readexactly(content_length), timeout=10)
+            body = await asyncio.wait_for(
+                reader.readexactly(content_length), timeout=10
+            )
 
         # ── Route handling ──────────────────────────────────────────────
         status = 200
@@ -362,6 +442,30 @@ async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
             "Expires": "0",
         }
         resp_body = b""
+
+        # ── Auth check (skip for / and /health) ───────────────────────────
+        if path_only not in ("/", "/health"):
+            if not check_auth(query, headers):
+                status = 401
+                resp_headers["Content-Type"] = "application/json"
+                resp_body = json.dumps(
+                    {"status": "error", "error": "unauthorized"}
+                ).encode()
+                # Send response immediately
+                status_text = {200: "OK", 401: "Unauthorized"}
+                resp_line = (
+                    f"HTTP/1.1 {status} {status_text.get(status, 'Unknown')}\r\n"
+                )
+                resp_bytes = resp_line.encode()
+                for key, value in resp_headers.items():
+                    resp_bytes += f"{key}: {value}\r\n".encode()
+                resp_bytes += f"Content-Length: {len(resp_body)}\r\n".encode()
+                resp_bytes += b"Connection: close\r\n\r\n"
+                resp_bytes += resp_body
+                writer.write(resp_bytes)
+                await writer.drain()
+                writer.close()
+                return
 
         if path_only == "/":
             resp_headers["Content-Type"] = "text/html; charset=utf-8"
@@ -377,7 +481,9 @@ async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
                     pty_mgr.spawn()
                     resp_body = json.dumps({"status": "ok"}).encode()
                 except Exception as e:
-                    resp_body = json.dumps({"status": "error", "error": str(e)}).encode()
+                    resp_body = json.dumps(
+                        {"status": "error", "error": str(e)}
+                    ).encode()
             else:
                 resp_body = json.dumps({"status": "ok"}).encode()
 
@@ -386,6 +492,7 @@ async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
             final_seq, data = pty_mgr.get_output_since(since)
             # Base64 encode binary data for safe JSON transport
             import base64
+
             encoded = base64.b64encode(data).decode()
             resp_headers["Content-Type"] = "application/json"
             resp_body = json.dumps({"seq": final_seq, "data": encoded}).encode()
@@ -398,7 +505,9 @@ async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
                     pty_mgr.write(data.encode("utf-8"))
                     resp_body = b'{"status":"ok"}'
                 except (json.JSONDecodeError, KeyError) as e:
-                    resp_body = json.dumps({"status": "error", "error": str(e)}).encode()
+                    resp_body = json.dumps(
+                        {"status": "error", "error": str(e)}
+                    ).encode()
             else:
                 resp_body = b'{"status":"error","error":"no data"}'
 
@@ -411,7 +520,9 @@ async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
                     # Resize not supported with script-based PTY (no TIOCSWINSZ)
                     resp_body = b'{"status":"ok"}'
                 except (json.JSONDecodeError, KeyError, ValueError) as e:
-                    resp_body = json.dumps({"status": "error", "error": str(e)}).encode()
+                    resp_body = json.dumps(
+                        {"status": "error", "error": str(e)}
+                    ).encode()
             else:
                 resp_body = b'{"status":"error","error":"no data"}'
 
@@ -435,7 +546,12 @@ async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
             resp_body = b"Not Found"
 
         # Build and send response
-        status_text = {200: "OK", 400: "Bad Request", 404: "Not Found", 500: "Internal Server Error"}
+        status_text = {
+            200: "OK",
+            400: "Bad Request",
+            404: "Not Found",
+            500: "Internal Server Error",
+        }
         resp_line = f"HTTP/1.1 {status} {status_text.get(status, 'Unknown')}\r\n"
         resp_bytes = resp_line.encode()
 
@@ -452,7 +568,9 @@ async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     except Exception as e:
         log.error(f"HTTP handler error: {e}")
         try:
-            writer.write(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 2\r\n\r\n{}")
+            writer.write(
+                b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 2\r\n\r\n{}"
+            )
             await writer.drain()
         except Exception:
             pass
