@@ -32,15 +32,28 @@ PORT = int(os.environ.get("WEBSHELL_PORT", "4200"))
 AUTH_TOKEN = os.environ.get("WEBSHELL_TOKEN")
 ROOT_PASSWORD = os.environ.get("ROOT_PASSWORD")
 
+# Debug: log what we got (first 3 chars only for security)
+log.info(
+    f"Auth config: TOKEN={'set' if AUTH_TOKEN else 'none'}, ROOT_PASSWORD={'set' if ROOT_PASSWORD else 'none'}"
+)
+if ROOT_PASSWORD:
+    log.info(
+        f"ROOT_PASSWORD length: {len(ROOT_PASSWORD)}, prefix: {ROOT_PASSWORD[:3]}..."
+    )
+
 import base64
 
 
 def check_basic_auth(headers: dict) -> bool:
     """Check HTTP Basic Auth credentials. Returns True if valid."""
     if not ROOT_PASSWORD:
+        log.debug("check_basic_auth: ROOT_PASSWORD not set")
         return False
 
     auth_header = headers.get("authorization", "")
+    log.debug(
+        f"check_basic_auth: auth_header present: {bool(auth_header)}, starts with Basic: {auth_header.startswith('Basic ')}"
+    )
     if not auth_header.startswith("Basic "):
         return False
 
@@ -48,8 +61,14 @@ def check_basic_auth(headers: dict) -> bool:
         encoded = auth_header[6:]  # Remove "Basic "
         decoded = base64.b64decode(encoded).decode("utf-8")
         username, password = decoded.split(":", 1)
-        return username == "root" and password == ROOT_PASSWORD
-    except Exception:
+        log.debug(
+            f"check_basic_auth: username={username}, password_len={len(password)}, expected_len={len(ROOT_PASSWORD)}"
+        )
+        result = username == "root" and password == ROOT_PASSWORD
+        log.debug(f"check_basic_auth: result={result}")
+        return result
+    except Exception as e:
+        log.debug(f"check_basic_auth: exception: {e}")
         return False
 
 
@@ -571,6 +590,11 @@ async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
                 "buffer_size": len(pty_mgr.output_buffer),
                 "total_seq": pty_mgr.seq,
                 "alive": pty_mgr.proc is not None,
+                "auth": {
+                    "token_configured": bool(AUTH_TOKEN),
+                    "root_password_configured": bool(ROOT_PASSWORD),
+                    "root_password_len": len(ROOT_PASSWORD) if ROOT_PASSWORD else 0,
+                },
             }
             if pty_mgr.proc:
                 debug_info["process_alive"] = pty_mgr.proc.poll() is None
