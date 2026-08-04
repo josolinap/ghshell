@@ -25,37 +25,63 @@ log = logging.getLogger("webshell")
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("WEBSHELL_PORT", "4200"))
 
-# ── Optional Token Auth ───────────────────────────────────────────────────
-# Set WEBSHELL_TOKEN env var to enable. Token can be passed via:
-#   - Query param: ?token=xxx
-#   - Header: X-Webshell-Token: xxx
-#   - Cookie: webshell_token=xxx
-# If not set, no auth required (open access on Tailnet)
+# ── Optional Auth ───────────────────────────────────────────────────────────
+# Set WEBSHELL_TOKEN for token auth (existing)
+# Set ROOT_PASSWORD for HTTP Basic Auth (user: root, pass: ROOT_PASSWORD)
+# If neither set, no auth required (open access on Tailnet)
 AUTH_TOKEN = os.environ.get("WEBSHELL_TOKEN")
+ROOT_PASSWORD = os.environ.get("ROOT_PASSWORD")
+
+import base64
+
+
+def check_basic_auth(headers: dict) -> bool:
+    """Check HTTP Basic Auth credentials. Returns True if valid."""
+    if not ROOT_PASSWORD:
+        return False
+
+    auth_header = headers.get("authorization", "")
+    if not auth_header.startswith("Basic "):
+        return False
+
+    try:
+        encoded = auth_header[6:]  # Remove "Basic "
+        decoded = base64.b64decode(encoded).decode("utf-8")
+        username, password = decoded.split(":", 1)
+        return username == "root" and password == ROOT_PASSWORD
+    except Exception:
+        return False
 
 
 def check_auth(query: dict, headers: dict) -> bool:
-    """Check if request has valid auth token. Returns True if allowed."""
-    if not AUTH_TOKEN:
-        return True  # No token configured = open access
-
-    # Check query param
-    if query.get("token") == AUTH_TOKEN:
+    """Check if request has valid auth. Returns True if allowed."""
+    # No auth configured = open access
+    if not AUTH_TOKEN and not ROOT_PASSWORD:
         return True
 
-    # Check header
-    auth_header = headers.get("x-webshell-token", "").strip()
-    if auth_header == AUTH_TOKEN:
+    # Check Basic Auth first (username/password)
+    if check_basic_auth(headers):
         return True
 
-    # Check cookie
-    cookie_header = headers.get("cookie", "")
-    if cookie_header:
-        for part in cookie_header.split(";"):
-            part = part.strip()
-            if part.startswith("webshell_token="):
-                if part.split("=", 1)[1] == AUTH_TOKEN:
-                    return True
+    # Check token auth (existing)
+    if AUTH_TOKEN:
+        # Check query param
+        if query.get("token") == AUTH_TOKEN:
+            return True
+
+        # Check header
+        auth_header = headers.get("x-webshell-token", "").strip()
+        if auth_header == AUTH_TOKEN:
+            return True
+
+        # Check cookie
+        cookie_header = headers.get("cookie", "")
+        if cookie_header:
+            for part in cookie_header.split(";"):
+                part = part.strip()
+                if part.startswith("webshell_token="):
+                    if part.split("=", 1)[1] == AUTH_TOKEN:
+                        return True
 
     return False
 
@@ -452,6 +478,11 @@ async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
             if not check_auth(query, headers):
                 status = 401
                 resp_headers["Content-Type"] = "application/json"
+                # Add WWW-Authenticate for Basic Auth (browser will show login prompt)
+                if ROOT_PASSWORD:
+                    resp_headers["WWW-Authenticate"] = (
+                        'Basic realm="RenderShell Web Terminal"'
+                    )
                 resp_body = json.dumps(
                     {"status": "error", "error": "unauthorized"}
                 ).encode()

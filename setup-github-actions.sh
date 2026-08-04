@@ -169,7 +169,7 @@ serverurl=unix:///tmp/supervisor.sock
 
 [program:webshell]
 command=/usr/bin/python3 /usr/local/bin/webshell.py
-environment=WEBSHELL_PORT="4200",WEBSHELL_TOKEN="${WEBSHELL_TOKEN:-}"
+environment=WEBSHELL_PORT="4200",WEBSHELL_TOKEN="${WEBSHELL_TOKEN:-}",ROOT_PASSWORD="${ROOT_PASSWORD:-}"
 stdout_logfile=/dev/stdout
 stdout_logfile_maxbytes=0
 stderr_logfile=/dev/stderr
