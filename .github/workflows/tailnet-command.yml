@@ -1,0 +1,70 @@
+name: Tailnet Command
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  bridge:
+    if: >-
+      github.event.issue.pull_request &&
+      github.event.comment.body == '/tailnet-bridge'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install and authenticate Tailscale
+        env:
+          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TAILSCALE_AUTHKEY:-}" ]; then
+            echo "TAILSCALE_AUTHKEY is not configured in repository secrets." >&2
+            exit 2
+          fi
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo mkdir -p /var/run/tailscale
+          sudo nohup tailscaled --state=mem: --socket=/var/run/tailscale/tailscaled.sock --tun=userspace-networking >/tmp/tailscaled.log 2>&1 &
+          for i in $(seq 1 20); do
+            [ -S /var/run/tailscale/tailscaled.sock ] && break
+            sleep 1
+          done
+          sudo tailscale up --auth-key="${TAILSCALE_AUTHKEY}" --hostname="chat-bridge" --accept-routes --reset
+          echo "=== TAILSCALE STATUS ==="
+          sudo tailscale status | tee /tmp/tailscale-status.txt || true
+          echo "=== TAILSCALE IP ==="
+          sudo tailscale ip | tee /tmp/tailscale-ip.txt || true
+          echo "=== TAILSCALE JSON SUMMARY ==="
+          sudo tailscale status --json 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print("BackendState:", d.get("BackendState")); print("Tailnet:", (d.get("CurrentTailnet") or {}).get("Name")); s=d.get("Self") or {}; print("Self:", s.get("HostName"), s.get("DNSName"), s.get("TailscaleIPs"), s.get("Online")); print("Peers:"); [print("  -", p.get("HostName"), p.get("DNSName"), p.get("TailscaleIPs"), p.get("Online")) for p in (d.get("Peer") or {}).values()]' | tee /tmp/tailscale-summary.txt || true
+          echo "=== CONNECTIVITY ==="
+          sudo tailscale ping --c 1 100.100.100.100 || true
+
+      - name: Report results to the PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          BODY=$(cat <<'EOF'
+## Tailnet bridge result
+
+```text
+STATUS
+EOF
+          )
+          {
+            echo "$BODY"
+            echo '```text'
+            cat /tmp/tailscale-ip.txt 2>/dev/null || true
+            cat /tmp/tailscale-summary.txt 2>/dev/null || true
+            echo '```'
+          } > /tmp/report.md
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file /tmp/report.md
