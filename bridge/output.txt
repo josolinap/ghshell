@@ -3,44 +3,46 @@ runnervmtr4k5
 === IDENTITY ===
 uid=1001(runner) gid=1001(runner) groups=1001(runner),4(adm),100(users),118(docker),999(systemd-journal)
 === TAILSCALE STATUS ===
-100.91.48.86     chat-bridge       chat-bridge.curl-trench.ts.net  linux    -                                                  
-100.117.210.49   archlinux         jomonsolinap@                   linux    idle; offers exit node                             
-100.101.159.6    cl2-pc            jomonsolinap@                   windows  offline, last seen 14d ago                         
-100.73.95.1      docker-lxc        jomonsolinap@                   linux    offline, last seen 16h ago                         
-100.70.124.26    ghshell           tagged-devices                  linux    idle; offers exit node                             
-100.106.140.121  nas               tagged-devices                  linux    offline, last seen 16h ago                         
-100.98.225.47    ns1               jomonsolinap@                   linux    idle; offers exit node                             
-100.75.116.108   ns2               jomonsolinap@                   linux    idle; offers exit node                             
-100.65.100.72    opencode          jomonsolinap@                   linux    -                                                  
-100.108.23.77    phone             jomonsolinap@                   android  offline, last seen 10h ago                         
-100.121.133.98   pve               jomonsolinap@                   linux    idle; offers exit node                             
-100.75.182.26    super-z-bridge    tagged-devices                  linux    idle; offers exit node; offline, last seen 4d ago  
-100.106.160.8    ts-dev-container  jomonsolinap@                   linux    idle; offers exit node; offline, last seen 4d ago  
-100.88.24.3      workstation-pc    jomonsolinap@                   windows  -                                                  
-100.86.150.35    z-bridge          jomonsolinap@                   linux    idle; offers exit node; offline, last seen 4d ago  
+100.104.0.43     chat-bridge-2     chat-bridge-2.curl-trench.ts.net  linux    -                                                  
+100.117.210.49   archlinux         jomonsolinap@                     linux    idle; offers exit node                             
+100.121.121.114  chat-bridge-1     tagged-devices                    linux    -                                                  
+100.91.48.86     chat-bridge       tagged-devices                    linux    offline, last seen 1m ago                          
+100.101.159.6    cl2-pc            jomonsolinap@                     windows  offline, last seen 14d ago                         
+100.73.95.1      docker-lxc        jomonsolinap@                     linux    offline, last seen 16h ago                         
+100.70.124.26    ghshell           tagged-devices                    linux    idle; offers exit node                             
+100.106.140.121  nas               tagged-devices                    linux    offline, last seen 16h ago                         
+100.98.225.47    ns1               jomonsolinap@                     linux    idle; offers exit node                             
+100.75.116.108   ns2               jomonsolinap@                     linux    idle; offers exit node                             
+100.65.100.72    opencode          jomonsolinap@                     linux    -                                                  
+100.108.23.77    phone             jomonsolinap@                     android  offline, last seen 10h ago                         
+100.121.133.98   pve               jomonsolinap@                     linux    idle; offers exit node                             
+100.75.182.26    super-z-bridge    tagged-devices                    linux    idle; offers exit node; offline, last seen 4d ago  
+100.106.160.8    ts-dev-container  jomonsolinap@                     linux    idle; offers exit node; offline, last seen 4d ago  
+100.88.24.3      workstation-pc    jomonsolinap@                     windows  -                                                  
+100.86.150.35    z-bridge          jomonsolinap@                     linux    idle; offers exit node; offline, last seen 4d ago  
 === TAILSCALE IP ===
-100.91.48.86
-100.91.48.86
+100.104.0.43
+100.104.0.43
 === TAILNET PING/CONNECTIVITY INVENTORY ===
 no matching peer
 === ROUTES ===
-default via 10.1.0.1 dev eth0 proto dhcp src 10.1.0.24 metric 100 
-10.1.0.0/20 dev eth0 proto kernel scope link src 10.1.0.24 metric 100 
-10.1.0.1 dev eth0 proto dhcp scope link src 10.1.0.24 metric 100 
-168.63.129.16 via 10.1.0.1 dev eth0 proto dhcp src 10.1.0.24 metric 100 
-169.254.169.254 via 10.1.0.1 dev eth0 proto dhcp src 10.1.0.24 metric 100 
+default via 10.1.0.1 dev eth0 proto dhcp src 10.1.0.245 metric 100 
+10.1.0.0/20 dev eth0 proto kernel scope link src 10.1.0.245 metric 100 
+10.1.0.1 dev eth0 proto dhcp scope link src 10.1.0.245 metric 100 
+168.63.129.16 via 10.1.0.1 dev eth0 proto dhcp src 10.1.0.245 metric 100 
+169.254.169.254 via 10.1.0.1 dev eth0 proto dhcp src 10.1.0.245 metric 100 
 172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1 linkdown 
 === DNS ===
+2606:b740:49::108 login.tailscale.com
+2606:b740:49::105 login.tailscale.com
 2606:b740:49::109 login.tailscale.com
 2606:b740:49::111 login.tailscale.com
 2606:b740:49::114 login.tailscale.com
 2606:b740:49::104 login.tailscale.com
 2606:b740:49::101 login.tailscale.com
 2606:b740:49::107 login.tailscale.com
-2606:b740:49::108 login.tailscale.com
-2606:b740:49::105 login.tailscale.com
 
 === BRIDGE METADATA ===
-UTC=2026-09-24T01:15:50Z
+UTC=2026-09-24T01:16:48Z
 HOST=runnervmtr4k5
 TAILSCALE_ADMIN=https://login.tailscale.com/admin/machines
