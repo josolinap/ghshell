@@ -1,0 +1,60 @@
+name: Tailnet Bridge PR
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: write
+
+jobs:
+  bridge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout bridge branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Install and authenticate Tailscale
+        env:
+          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TAILSCALE_AUTHKEY:-}" ]; then
+            echo "TAILSCALE_AUTHKEY is not configured in repository secrets." >&2
+            exit 2
+          fi
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo mkdir -p /var/run/tailscale
+          sudo nohup tailscaled --state=mem: --socket=/var/run/tailscale/tailscaled.sock --tun=userspace-networking >/tmp/tailscaled.log 2>&1 &
+          for i in $(seq 1 20); do
+            [ -S /var/run/tailscale/tailscaled.sock ] && break
+            sleep 1
+          done
+          sudo tailscale up --auth-key="${TAILSCALE_AUTHKEY}" --hostname="chat-bridge" --accept-routes --reset
+          echo "=== TAILSCALE STATUS ==="
+          sudo tailscale status || true
+          echo "=== TAILSCALE IP ==="
+          sudo tailscale ip || true
+          echo "=== TAILSCALE JSON SUMMARY ==="
+          sudo tailscale status --json 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print("BackendState:", d.get("BackendState")); print("Tailnet:", (d.get("CurrentTailnet") or {}).get("Name")); s=d.get("Self") or {}; print("Self:", s.get("HostName"), s.get("DNSName"), s.get("TailscaleIPs"), s.get("Online")); print("Peers:"); [print("  -", p.get("HostName"), p.get("DNSName"), p.get("TailscaleIPs"), p.get("Online")) for p in (d.get("Peer") or {}).values()]' || true
+
+      - name: Execute bridge diagnostics
+        run: |
+          set -euo pipefail
+          chmod +x bridge/command.sh
+          ./bridge/command.sh | tee bridge/output.txt
+          {
+            echo
+            echo "=== BRIDGE METADATA ==="
+            echo "UTC=$(date -u +%FT%TZ)"
+            echo "HOST=$(hostname)"
+          } >> bridge/output.txt
+
+      - name: Upload diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: tailnet-bridge-${{ github.run_id }}
+          path: bridge/output.txt
