@@ -161,6 +161,27 @@ jobs:
             echo "   Pass 'funnel: true' at dispatch to expose the terminal publicly."
           fi
 
+      - name: Tailnet Diagnostics
+        run: |
+          echo ""
+          echo "════════════════ TAILNET DIAGNOSTICS ════════════════"
+          echo "Node IPs:"
+          sudo tailscale ip -1 || true
+          sudo tailscale ip -4 || true
+          echo ""
+          echo "Local node:"
+          sudo tailscale status --self=false 2>/dev/null | head -n 1 || true
+          echo ""
+          echo "Tailnet peer inventory:"
+          sudo tailscale status --json 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print("BackendState:", d.get("BackendState")); print("TUN:", d.get("TUN")); print("CurrentTailnet:", d.get("CurrentTailnet", {}).get("Name")); print("Peers:"); [print("  -", p.get("HostName"), p.get("DNSName"), p.get("TailscaleIPs", []), p.get("Online")) for p in d.get("Peer", {}).values()]' || true
+          echo ""
+          echo "Network diagnostics:"
+          sudo tailscale netcheck 2>/dev/null || true
+          echo ""
+          echo "DNS configuration:"
+          sudo tailscale dns status 2>/dev/null || true
+          echo "══════════════════════════════════════════════════════"
+
       - name: Session Info
         env:
           HOSTNAME: ${{ inputs.hostname || secrets.TAILSCALE_HOSTNAME || 'render-shell' }}
