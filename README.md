@@ -77,26 +77,28 @@ tailscale up --exit-node=render-shell --exit-node-allow-lan-access=true
 
 ### 5. Access the web terminal
 
-The shellinabox terminal is **only accessible via your Tailnet** (not the public Render URL):
+The shellinabox terminal is **only accessible via your Tailnet** (not the public Render URL).
+`supervisord` runs `tailscale serve --bg 4200`, so port 443 on your node proxies to the terminal:
 
 ```
-http://render-shell.<your-tailnet>.ts.net:4200
+https://render-exit-node.<your-tailnet>.ts.net/
 ```
 
 Or find the IP:
 ```bash
-tailscale status | grep render-shell
-# → 100.x.x.x  render-shell  ...
+tailscale status | grep render-exit-node
+# → 100.x.x.x  render-exit-node  ...
 ```
 
-Then open `http://100.x.x.x:4200` in your browser. Login with `root` + your `ROOT_PASSWORD`.
+Then open `https://100.x.x.x` in your browser (port 443, via Tailscale Serve).
+Login with `root` + your `ROOT_PASSWORD`.
 
 ## What's exposed where
 
 | Port | Where | What |
 |---|---|---|
 | 8080 | Public Render URL (`https://...onrender.com`) | Status page (HTML) |
-| 4200 | Tailnet only (`http://render-shell:4200`) | Shellinabox web terminal |
+| 443 | Tailnet only (`https://render-exit-node.<tailnet>.ts.net/`) | Shellinabox web terminal (via `tailscale serve` → 4200) |
 | — | Tailscale | Exit node routing |
 
 The web terminal is **not** on the public Render URL — only the status page is. This is intentional: the terminal should be private.
@@ -152,9 +154,10 @@ RUN apk add --no-cache dcron
 - Check that the authkey hasn't expired (reusable keys last 90 days)
 - Check Render logs for the exact error
 
-**Web terminal not reachable at `http://render-shell:4200`**
-- Verify the node is online: `tailscale status | grep render-shell`
-- Userspace networking doesn't expose ports to the Tailnet directly — you may need to use `tailscale serve` or `tailscale funnel` to expose 4200
+**Web terminal not reachable at `https://render-exit-node.<tailnet>.ts.net/`**
+- Verify the node is online: `tailscale status | grep render-exit-node`
+- Userspace networking doesn't expose ports to the Tailnet directly — `tailscale serve` bridges 443 → 4200. Check the mapping: `tailscale serve status`
+- Confirm shellinabox is listening: `ss -tlnp | grep 4200`
 
 **Exit node not routing traffic**
 - Approve the exit node in https://login.tailscale.com/admin/machines

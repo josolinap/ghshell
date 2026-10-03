@@ -12,13 +12,6 @@ else
     echo "[entrypoint] WARNING: ROOT_PASSWORD not set — using default 'change-me'"
 fi
 
-# Update File Browser admin password at runtime
-if [ -n "${FILEBROWSER_PASSWORD}" ]; then
-    filebrowser users update admin --password "${FILEBROWSER_PASSWORD}" --database /etc/filebrowser.db 2>/dev/null || \
-    filebrowser users add admin "${FILEBROWSER_PASSWORD}" --perm.admin --database /etc/filebrowser.db 2>/dev/null || true
-    echo "[entrypoint] filebrowser admin password updated"
-fi
-
 # Validate TAILSCALE_AUTHKEY
 if [ -z "${TAILSCALE_AUTHKEY}" ]; then
     echo "[entrypoint] WARNING: TAILSCALE_AUTHKEY not set — node will not register"
@@ -50,7 +43,6 @@ cat > /etc/motd << 'MOTD'
    ╚══════════════════════════════════════════╝
 
    Web terminal:  https://render-exit-node.curl-trench.ts.net/
-   File browser:  https://render-exit-node.curl-trench.ts.net/files
 
    ⚠  Files are NOT persistent — use git or external storage
    ⚠  Container sleeps after 15 min inactivity (free tier)
